@@ -153,13 +153,38 @@ function _fetchCode({ user, authCode, imapServer, imapPort }) {
                     // 优先匹配验证码类主题（DNSHE / 验证码 / verification / code）
                     const verifySubject = /(dnshe|验证码|verification|verify.?code|安全|登录)/i.test(subject);
                     if (!foundCode && verifySubject) {
-                      // 避免 6 位数字的域名被误识别成验证码
-                      const cleanBody = bodyText.replace(user, '');
-                      const match = cleanBody.match(/\b\d{6}\b/);
-                      if (match) {
-                        foundCode = match[0];
-                        logger.info(`[verify] 从邮件 #${seqno} 提取到验证码: ${foundCode}`);
+                      let code = null;
 
+                      // 策略1: 从原始 HTML 中精确提取（匹配 DNSHE 邮件格式：
+                      // <strong>949526</strong> 紧跟在"验证码是"后面）
+                      const rawHtml = parsed.html || '';
+                      const htmlMatch = rawHtml.match(/验证码是[：:]\s*<[^>]*>\s*(\d{6})\s*<\/[^>]*>/i);
+                      if (htmlMatch) {
+                        code = htmlMatch[1];
+                        logger.info(`[verify] 从 HTML 精确提取验证码: ${code}`);
+                      }
+
+                      // 策略2: 从纯文本提取（"验证码是: 949526" 或 "验证码：949526"）
+                      if (!code) {
+                        const textMatch = bodyText.match(/验证码[是:：]\D*(\d{6})/i);
+                        if (textMatch) {
+                          code = textMatch[1];
+                          logger.info(`[verify] 从文本提取验证码: ${code}`);
+                        }
+                      }
+
+                      // 策略3: 兜底——避免 6 位数字的域名被误识别
+                      if (!code) {
+                        const cleanBody = bodyText.replace(user, '');
+                        const fallbackMatch = cleanBody.match(/\b\d{6}\b/);
+                        if (fallbackMatch) {
+                          code = fallbackMatch[0];
+                          logger.info(`[verify] 从文本兜底提取验证码: ${code}`);
+                        }
+                      }
+
+                      if (code) {
+                        foundCode = code;
                         // 仅标记已读（不删除邮件），防止下次被当作未读验证码再次读取
                         try {
                           imap.addFlags(seqno, '\\Seen', () => {});

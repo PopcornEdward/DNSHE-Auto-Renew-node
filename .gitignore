@@ -1,0 +1,21 @@
+# dependencies
+node_modules/
+
+# local credentials & env (never commit)
+.env
+users.json
+
+# browser profile / runtime data
+ChromeData_DNSHE/
+ChromeData_*/
+
+# screenshots & diagnostic artifacts
+screenshots/
+photo/
+
+# logs
+*.log
+
+# os stuff
+.DS_Store
+Thumbs.db

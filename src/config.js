@@ -1,0 +1,210 @@
+'use strict';
+
+/**
+ * 统一配置：全部来自环境变量（GitHub Actions 通过 Secrets 注入，
+ * 本地调试可通过 .env 或直接 export）。
+ *
+ * 浏览器相关的页面选择器集中放在 SELECTORS 里：若 DNSHE 页面结构
+ * 调整，只需修改此处，不需要动引擎代码。
+ */
+
+const fs = require('fs');
+const path = require('path');
+
+// ---------------------------------------------------------------------------
+// DNSHE 相关 URL（官方调整入口时只需改这里）
+// ---------------------------------------------------------------------------
+const BASE_URL = 'https://api005.dnshe.com/index.php?m=domain_hub';
+const LOGIN_URL = 'https://my.dnshe.com/clientarea.php';
+const DOMAINS_URL = 'https://my.dnshe.com/index.php?m=domain_hub';
+
+// 列表接口字段（与官方 API 文档 V2.0 一致）
+const LIST_FIELDS =
+  'id,subdomain,rootdomain,full_domain,status,expires_at,never_expires';
+
+// 续期窗口（天）：到期前 180 天开放续期，剩余天数 >= 阈值则跳过
+const DEFAULT_THRESHOLD_DAYS = 180;
+const PAGE_SIZE = 200;
+const MAX_PAGES = 100;
+
+// 良性错误码：尚未进入续期窗口，属预期结果，不计入失败
+const BENIGN_ERROR_CODES = new Set(['renewal_not_yet_available']);
+
+// ---------------------------------------------------------------------------
+// 浏览器引擎页面选择器（集中管理）
+// ---------------------------------------------------------------------------
+const SELECTORS = {
+  // 登录表单：WHMCS 标准为 input[name=username]/[name=password]
+  usernameInputs: ['input[name="username"]', '#inputEmail', 'input[type="email"]'],
+  passwordInputs: ['input[name="password"]', '#inputPassword', 'input[type="password"]'],
+  loginButtons: ['button[type="submit"]', 'input[type="submit"]'],
+  // 登录失败提示（出现任一即判定登录失败）
+  loginFailedTexts: [
+    'Incorrect password',
+    'incorrect password or no account',
+    '用户名或密码错误',
+    '登录失败',
+    'Invalid login',
+  ],
+  // 续期按钮候选文案（DNSHE 官方文档确认文案为 "Free Renewal"）
+  renewTexts: ['Free Renewal', 'Renew', '免费续期', '续期'],
+  // 续期/验证成功标志（出现任一即视为成功）
+  successMarkers: ['Success!', '续期成功', 'renewed successfully', '操作成功'],
+  // 尚未进入续期窗口等提示（命中则视为“本次无需续期”）
+  notReadyMarkers: ['not_yet_available', '暂不可续期', "You can't renew", '尚未开放'],
+  // captcha 未通过提示（命中则刷新页面重试）
+  captchaErrorMarkers: [
+    'Please complete the captcha',
+    'Complete the captcha to continue',
+    '验证未通过',
+    'security check',
+  ],
+};
+
+// ---------------------------------------------------------------------------
+// 读取辅助
+// ---------------------------------------------------------------------------
+function text(name) {
+  return (process.env[name] || '').trim();
+}
+
+function number(name, fallback) {
+  const raw = text(name);
+  if (!raw) return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function parseJsonEnv(name, fallback, what) {
+  const raw = text(name);
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    logger_warn(`环境变量 ${name} 不是合法 JSON，已忽略（${what}）`);
+    return fallback;
+  }
+}
+
+// 避免循环依赖：logger 只在异常时使用，此处直接内联打印
+function logger_warn(msg) {
+  console.warn(`[config] ${msg}`);
+}
+
+// ---------------------------------------------------------------------------
+// 浏览器引擎配置
+// ---------------------------------------------------------------------------
+function detectChromePath() {
+  const envPath = text('CHROME_PATH');
+  if (envPath) return envPath;
+  if (process.platform === 'win32') {
+    const candidates = [
+      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    ];
+    for (const p of candidates) {
+      if (fs.existsSync(p)) return p;
+    }
+    return candidates[0];
+  }
+  // Linux (GitHub Actions runner 自带 google-chrome)
+  return '/usr/bin/google-chrome';
+}
+
+function browserConfig() {
+  const debugPort = number('CDP_PORT', 9222);
+  const headless = text('CHROME_HEADLESS') === 'true';
+  return {
+    loginUrl: text('DNSHE_LOGIN_URL') || LOGIN_URL,
+    domainsUrl: text('DNSHE_DOMAINS_URL') || DOMAINS_URL,
+    chromePath: detectChromePath(),
+    userDataDir: path.join(process.cwd(), 'ChromeData_DNSHE'),
+    debugPort,
+    headless,
+    selectors: SELECTORS,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 账号来源：USERS_JSON > users.json > DNSHE_USERNAME/DNSHE_PASSWORD
+// ---------------------------------------------------------------------------
+function browserUsers() {
+  const json = parseJsonEnv('USERS_JSON', null, '多账号模式仅支持浏览器引擎');
+  if (Array.isArray(json) && json.length > 0) return json;
+
+  const file = path.join(process.cwd(), 'users.json');
+  if (fs.existsSync(file)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+      const list = Array.isArray(data) ? data : data.users;
+      if (Array.isArray(list) && list.length > 0) return list;
+    } catch (e) {
+      logger_warn(`读取 users.json 失败: ${e.message}`);
+    }
+  }
+
+  const u = text('DNSHE_USERNAME');
+  const p = text('DNSHE_PASSWORD');
+  if (u && p) return [{ username: u, password: p }];
+  return [];
+}
+
+// ---------------------------------------------------------------------------
+// API 引擎配置
+// ---------------------------------------------------------------------------
+function apiConfig() {
+  return {
+    baseUrl: text('DNSHE_API_BASE_URL') || BASE_URL,
+    apiKey: text('DNSHE_API_KEY'),
+    apiSecret: text('DNSHE_API_SECRET'),
+    thresholdDays: Math.round(number('DNSHE_RENEW_THRESHOLD_DAYS', DEFAULT_THRESHOLD_DAYS)),
+    minInterval: number('DNSHE_MIN_INTERVAL', 2),
+    tzOffsetHours: number('DNSHE_TZ_OFFSET', 8),
+    listFields: LIST_FIELDS,
+    pageSize: PAGE_SIZE,
+    maxPages: MAX_PAGES,
+    benignErrorCodes: BENIGN_ERROR_CODES,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 推送通知配置（用户自部署的 substracker / 通用 Webhook / Telegram）
+// ---------------------------------------------------------------------------
+function notifyConfig() {
+  return {
+    pushUrl: text('PUSH_URL'), // 形如 https://your-substracker.example.com/api/send/your-key
+    pushHeaders: parseJsonEnv('PUSH_HEADERS', null, '自定义请求头'),
+    pushTemplate: parseJsonEnv('PUSH_TEMPLATE', null, '自定义消息体模板'),
+    pushTitle: text('PUSH_TITLE') || 'DNSHE 域名自动续期报告',
+    // Telegram 直推（可选）：TG_BOT_TOKEN + TG_CHAT_ID，未配置则跳过通知
+    tgBotToken: text('TG_BOT_TOKEN'),
+    tgChatId: text('TG_CHAT_ID'),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 汇总导出
+// ---------------------------------------------------------------------------
+function loadConfig() {
+  const mode = text('DNSHE_MODE') || 'browser';
+  if (mode !== 'browser' && mode !== 'api') {
+    throw new Error(`DNSHE_MODE 取值非法: ${mode}（仅支持 browser / api）`);
+  }
+  return {
+    mode,
+    browser: browserConfig(),
+    api: apiConfig(),
+    notify: notifyConfig(),
+  };
+}
+
+function getUsers() {
+  return browserUsers();
+}
+
+module.exports = {
+  loadConfig,
+  getUsers,
+  DEFAULT_THRESHOLD_DAYS,
+  BENIGN_ERROR_CODES,
+};

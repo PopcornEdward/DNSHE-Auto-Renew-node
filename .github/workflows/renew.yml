@@ -1,0 +1,67 @@
+# DNSHE 域名自动续期（Node.js 版 · GitHub Actions + Playwright/CDP 绕过 Cloudflare 盾）
+
+name: "DNSHE Domain Auto Renew"
+
+on:
+  schedule:
+    # cron 表达式：分 时 日 月 周（UTC）
+    # 每月 1 日 00:00 UTC = 北京时间每月 1 日 08:00
+    # DNSHE 续期窗口在到期前 180 天打开，每月执行一次足够，可自行改密
+    - cron: '0 0 1 * *'
+  workflow_dispatch: # 保留手动触发按钮，便于测试
+
+concurrency:
+  group: dnshe-auto-renew
+  cancel-in-progress: false
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          npm install
+          npx playwright install-deps chrome
+
+      # 浏览器引擎：xvfb 提供虚拟显示器，以"有头"形态跑 Chrome，
+      # Cloudflare 对真实渲染的识别度远低于 headless，绕过成功率更高
+      - name: Run DNSHE auto renew
+        env:
+          # ---- 引擎选择：browser（默认）/ api（官方 REST API）----
+          DNSHE_MODE: ${{ secrets.DNSHE_MODE }}
+          # ---- 浏览器引擎账号 ----
+          DNSHE_USERNAME: ${{ secrets.DNSHE_USERNAME }}
+          DNSHE_PASSWORD: ${{ secrets.DNSHE_PASSWORD }}
+          USERS_JSON: ${{ secrets.USERS_JSON }}
+          # ---- 官方 API 引擎凭据（DNSHE_MODE=api 时必填）----
+          DNSHE_API_KEY: ${{ secrets.DNSHE_API_KEY }}
+          DNSHE_API_SECRET: ${{ secrets.DNSHE_API_SECRET }}
+          # ---- 推送通知（自部署 substracker / 任意 POST JSON 网关）----
+          PUSH_URL: ${{ secrets.PUSH_URL }}
+          PUSH_TITLE: ${{ secrets.PUSH_TITLE }}
+          PUSH_HEADERS: ${{ secrets.PUSH_HEADERS }}
+          PUSH_TEMPLATE: ${{ secrets.PUSH_TEMPLATE }}
+          # ---- 可选：Telegram 直推（TG_BOT_TOKEN + TG_CHAT_ID，未配置则跳过）----
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          # ---- 可选：续期阈值（默认 180 天）----
+          DNSHE_RENEW_THRESHOLD_DAYS: ${{ secrets.DNSHE_RENEW_THRESHOLD_DAYS }}
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node renew.js
+
+      - name: Upload screenshots
+        if: always() # 无论成功失败都上传截图，便于人工核对
+        uses: actions/upload-artifact@v4
+        with:
+          name: dnshe-renew-screenshots
+          path: screenshots/
+          if-no-files-found: ignore

@@ -1,0 +1,19 @@
+{
+  "name": "dnshe-auto-renew-node",
+  "version": "1.0.0",
+  "description": "DNSHE 免费域名自动续期（GitHub Actions + cron + Playwright/CDP 绕过 Cloudflare 盾，Node.js 版）",
+  "main": "renew.js",
+  "scripts": {
+    "start": "node renew.js",
+    "check": "node --check renew.js && node --check src/config.js && node --check src/logger.js && node --check src/notify.js && node --check src/inject.js && node --check src/turnstile.js && node --check src/browser-engine.js && node --check src/api-engine.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "playwright": "^1.40.0",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  }
+}

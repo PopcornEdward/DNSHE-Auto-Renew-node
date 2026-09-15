@@ -34,31 +34,97 @@ const BENIGN_ERROR_CODES = new Set(['renewal_not_yet_available']);
 // 浏览器引擎页面选择器（集中管理）
 // ---------------------------------------------------------------------------
 const SELECTORS = {
-  // 登录表单：WHMCS 标准为 input[name=username]/[name=password]
-  usernameInputs: ['input[name="username"]', '#inputEmail', 'input[type="email"]'],
-  passwordInputs: ['input[name="password"]', '#inputPassword', 'input[type="password"]'],
-  loginButtons: ['button[type="submit"]', 'input[type="submit"]'],
-  // 登录失败提示（出现任一即判定登录失败）
+  // ---- 登录页（新版 DNSHE 2026-09） ----
+  usernameInputs: [
+    'input[name="username"]',
+    'input[type="email"]',
+    'input[placeholder*="Username" i]',
+    'input[placeholder*="Email" i]',
+  ],
+  passwordInputs: [
+    'input[name="password"]',
+    'input[type="password"]',
+    'input[placeholder*="Password" i]',
+  ],
+  loginButtons: [
+    'button:has-text("Sign In")',
+    'button[type="submit"]',
+    'input[type="submit"]',
+  ],
+  // 登录失败提示
   loginFailedTexts: [
     'Incorrect password',
     'incorrect password or no account',
     '用户名或密码错误',
     '登录失败',
     'Invalid login',
+    'Invalid email or password',
   ],
-  // 续期按钮候选文案（DNSHE 官方文档确认文案为 "Free Renewal"）
-  renewTexts: ['Free Renewal', 'Renew', '免费续期', '续期'],
-  // 续期/验证成功标志（出现任一即视为成功）
-  successMarkers: ['Success!', '续期成功', 'renewed successfully', '操作成功'],
-  // 尚未进入续期窗口等提示（命中则视为“本次无需续期”）
-  notReadyMarkers: ['not_yet_available', '暂不可续期', "You can't renew", '尚未开放'],
-  // captcha 未通过提示（命中则刷新页面重试）
-  captchaErrorMarkers: [
-    'Please complete the captcha',
-    'Complete the captcha to continue',
-    '验证未通过',
-    'security check',
+
+  // ---- 域名列表页 ----
+  // "管理域名"按钮（用于提取 domain_id 或点击）
+  manageDomainButtons: [
+    'a:has-text("管理域名")',
+    'button:has-text("管理域名")',
+    '.btn:has-text("管理域名")',
+    'a[href*="domain_id="]',
   ],
+
+  // ---- 域名详情页 -> "续期和域名详情" tab ----
+  renewTabSelectors: [
+    'text="续期和域名详情"',
+    'text="Renewal and Domain Details"',
+    '[role="tab"]:has-text("续期")',
+    '.tab:has-text("续期")',
+    'a:has-text("续期和域名详情")',
+  ],
+
+  // ---- 域名详情页 -> 续期操作 ----
+  // "当前不可续期"禁用按钮（跳过）
+  notRenewableSelectors: [
+    'button:has-text("当前不可续期")',
+    '.btn:has-text("当前不可续期")',
+    '[disabled]:has-text("当前不可续期")',
+  ],
+  // 可点击的续期按钮
+  renewActionButtons: [
+    'button:has-text("续期")',
+    '.btn:has-text("续期")',
+    'button:has-text("Renew")',
+    '.btn:has-text("Renew")',
+    'button:has-text("免费续期")',
+  ],
+  // 确认弹窗按钮
+  confirmSelectors: [
+    'button:has-text("确认")',
+    'button:has-text("确定")',
+    'button:has-text("Confirm")',
+    '.btn:has-text("确认")',
+  ],
+
+  // ---- 退出登录 ----
+  // 右上角头像/用户名（触发下拉菜单）
+  userMenuTriggers: [
+    '[class*="avatar"]',
+    '[class*="user-menu"]',
+    'header [class*="user"]',
+    '.navbar .dropdown-toggle',
+    '.user-dropdown',
+    '[class*="profile"]',
+  ],
+  // "退出账户"按钮
+  logoutButtons: [
+    'text="退出账户"',
+    'text="Logout"',
+    'text="Sign Out"',
+    'a:has-text("退出")',
+    'button:has-text("退出")',
+  ],
+
+  // ---- 结果判定 ----
+  successMarkers: ['Success!', '续期成功', 'renewed successfully', '操作成功', '续期申请已提交'],
+  failMarkers: ['续期失败', '操作失败', 'Failed', 'Error', '错误'],
+  notReadyMarkers: ['当前不可续期', 'not_yet_available', '暂不可续期', "You can't renew", '尚未开放'],
 };
 
 // ---------------------------------------------------------------------------

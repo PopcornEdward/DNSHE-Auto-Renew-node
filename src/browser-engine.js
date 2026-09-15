@@ -3,15 +3,20 @@
 /**
  * 浏览器引擎：DNSHE 域名自动续期（Playwright + 原生 Chrome CDP 控制）。
  *
- * 整体流程（继承自 katabump 项目并适配 DNSHE）：
- *  1. 以 --remote-debugging-port 启动原生 Chrome（GitHub Actions 上配合
- *     xvfb 模拟有头环境，降低 Cloudflare 识别度）；
- *  2. Playwright connectOverCDP 直连 Chrome，建立真实浏览器会话；
- *  3. 注入 stealth 插件 + Turnstile hook 脚本（src/inject.js）；
- *  4. 逐账号：登录 my.dnshe.com -> 打开免费域名管理页 -> 逐个点击
- *     "Free Renewal" 续期按钮 -> 若触发 Cloudflare Turnstile，用 CDP
- *     原生鼠标事件点击绕过 -> 判定结果；
- *  5. 汇总报告并推送（notify.js），全程截图留痕。
+ * 新版 DNSHE 流程（基于用户提供的 2026-09 截图）：
+ *  1. 登录 https://my.dnshe.com/clientarea.php（用户名/密码 + Sign In）
+ *  2. 进入域名列表 https://my.dnshe.com/index.php?m=domain_hub
+ *  3. 提取每行域名的 domain_id（从"管理域名"按钮 href 或 data-domain-id）
+ *  4. 逐个访问域名详情页：https://my.dnshe.com/index.php?m=domain_hub&view=domain&domain_id={id}
+ *  5. 点击"续期和域名详情" tab
+ *  6. 检查续期按钮：文本为"当前不可续期"且 disabled → 跳过
+ *     否则点击续期，等待结果
+ *  7. 返回列表继续下一个域名
+ *  8. 全部完成后：点击右上角头像 → 点击"退出账户"
+ *  9. 等待 8s，若未跳转到 clientarea.php 则强制访问
+ * 10. 处理下一个 USERS_JSON 账号
+ *
+ * CDP 绕 Cloudflare 盾逻辑（stealth + Turnstile hook）保持不变。
  */
 
 const fs = require('fs');
@@ -122,9 +127,9 @@ async function clickFirstVisible(page, selectors, what) {
   await loc.click();
 }
 
-/** 页面是否存在登录表单（任一用户名字段可见） */
-async function detectLoginForm(page, cfg) {
-  const loc = await findVisible(page, cfg.selectors.usernameInputs, 2000);
+/** 页面是否存在登录表单 */
+async function detectLoginForm(page, browserCfg) {
+  const loc = await findVisible(page, browserCfg.selectors.usernameInputs, 2000);
   return loc !== null;
 }
 
@@ -141,57 +146,11 @@ async function anyTextVisible(page, texts, timeoutMs = 600) {
   return null;
 }
 
-/** 找页面上第一个可见的续期按钮（button / link / 任意可点击元素） */
-async function findRenewButton(page, cfg) {
-  const texts = cfg.selectors.renewTexts;
-  for (const t of texts) {
-    for (const role of ['button', 'link', 'menuitem']) {
-      try {
-        const loc = page.getByRole(role, { name: t, exact: false }).first();
-        if (await loc.isVisible({ timeout: 1500 })) return loc;
-      } catch (e) {
-        /* 继续 */
-      }
-    }
-    // 兜底：任意标签文本命中（可能导致误点，用于页面结构非标准的情况）
-    try {
-      const loc = page.getByText(t, { exact: false }).first();
-      if (await loc.isVisible({ timeout: 1500 })) {
-        const tag = await loc.evaluate((el) => el.tagName.toLowerCase()).catch(() => '');
-        if (tag !== 'body' && tag !== 'html') return loc;
-      }
-    } catch (e) {
-      /* 继续 */
-    }
-  }
-  return null;
-}
-
-/** 续期后可能弹出确认框：出现确认/确定类按钮则点击 */
-async function clickConfirmIfAppears(page, cfg, timeoutMs = 3000) {
-  const candidates = ['Confirm Renewal', 'Confirm', '确认续期', '确定', '确认', 'Yes'];
-  for (const c of candidates) {
-    try {
-      for (const role of ['button', 'link']) {
-        const loc = page.getByRole(role, { name: c, exact: false }).first();
-        if (await loc.isVisible({ timeout: 600 })) {
-          logger.info(`[renew] 检测到确认按钮 "${c}"，点击`);
-          await loc.click();
-          return true;
-        }
-      }
-    } catch (e) {
-      /* 继续 */
-    }
-  }
-  return false;
-}
-
 /**
  * 截图留痕：每次同时输出两张图
- *   - 缩略图 viewport 截图（供 Telegram 图片消息推送 / 快速预览）
- *   - 整页 full 截图（供 Actions Artifacts 完整存档）
- * @returns {Promise<string|null>} 缩略图绝对路径，失败返回 null
+ *   - 缩略图 viewport 截图（供 Telegram 图片消息推送）
+ *   - 整页 full 截图（供 Actions Artifacts 存档）
+ * @returns {Promise<string|null>} 缩略图绝对路径
  */
 async function shoot(page, tag) {
   try {
@@ -199,8 +158,8 @@ async function shoot(page, tag) {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const thumbFile = path.join(SCREENSHOT_DIR, `${stamp}_${tag}_thumb.png`);
     const fullFile = path.join(SCREENSHOT_DIR, `${stamp}_${tag}_full.png`);
-    await page.screenshot({ path: thumbFile }); // viewport 缩略
-    await page.screenshot({ path: fullFile, fullPage: true }); // 整页存档
+    await page.screenshot({ path: thumbFile });
+    await page.screenshot({ path: fullFile, fullPage: true });
     logger.info(`[browser] 截图已保存(缩略+整页): ${path.basename(thumbFile)}`);
     return thumbFile;
   } catch (e) {
@@ -213,24 +172,28 @@ async function shoot(page, tag) {
 // 登录
 // ---------------------------------------------------------------------------
 
-async function ensureLoggedIn(page, cfg, user) {
-  await page.goto(cfg.domainsUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+async function ensureLoggedIn(page, browserCfg, user) {
+  await page.goto(browserCfg.loginUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForTimeout(3000);
 
-  if (!(await detectLoginForm(page, cfg))) {
-    logger.ok(`[${user.username}] 已处于登录态（免登录表单）`);
-    return { ok: true };
+  // 如果已经在 dashboard（没有登录表单），可能是 cookie 未过期
+  if (!(await detectLoginForm(page, browserCfg))) {
+    // 再确认下是否真的是登录态（检查 dashboard 特征元素）
+    const dashboardIndicators = ['欢迎回来', '我的域名', '控制台概览', 'Welcome back'];
+    const onDashboard = await anyTextVisible(page, dashboardIndicators, 1500);
+    if (onDashboard) {
+      logger.ok(`[${user.username}] 已处于登录态（cookie 未过期）`);
+      return { ok: true };
+    }
   }
 
   logger.info(`[${user.username}] 检测到登录表单，执行登录...`);
-  await page.goto(cfg.loginUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await page.waitForTimeout(2500);
 
-  const sels = cfg.selectors;
+  const sels = browserCfg.selectors;
   await fillFirstVisible(page, sels.usernameInputs, user.username, '用户名');
   await fillFirstVisible(page, sels.passwordInputs, user.password, '密码');
 
-  // 登录前若出现 Turnstile，CDP 点击绕过（最多尝试 15 次）
+  // 登录前若出现 Turnstile，CDP 点击绕过
   let cdpClicked = false;
   for (let i = 0; i < 15; i++) {
     if (await attemptTurnstile(page)) {
@@ -256,10 +219,14 @@ async function ensureLoggedIn(page, cfg, user) {
       const thumb = await shoot(page, 'login_failed');
       return { ok: false, reason: `登录失败（页面提示: ${failedText}）`, thumb };
     }
-    if (!(await detectLoginForm(page, cfg))) {
-      logger.ok(`[${user.username}] 登录成功`);
-      await shoot(page, 'after_login');
-      return { ok: true };
+    if (!(await detectLoginForm(page, browserCfg))) {
+      // 确认是否真的登录成功（检查 dashboard 特征）
+      const onDashboard = await anyTextVisible(page, ['欢迎回来', '我的域名', '控制台概览', 'Welcome back'], 500);
+      if (onDashboard) {
+        logger.ok(`[${user.username}] 登录成功`);
+        await shoot(page, 'after_login');
+        return { ok: true };
+      }
     }
     await sleep(1000);
   }
@@ -268,102 +235,259 @@ async function ensureLoggedIn(page, cfg, user) {
 }
 
 // ---------------------------------------------------------------------------
+// 域名列表提取
+// ---------------------------------------------------------------------------
+
+async function fetchDomainList(page, browserCfg, user) {
+  await page.goto(browserCfg.domainsUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await page.waitForTimeout(3500);
+
+  // 截图：域名列表页
+  await shoot(page, 'domain_list');
+
+  // 在页面上下文中提取域名列表（从"管理域名"按钮的 href 中提取 domain_id）
+  const domains = await page.evaluate((selectors) => {
+    const results = [];
+    const seen = new Set();
+
+    // 策略1：找所有包含 domain_id 的链接
+    document.querySelectorAll('a[href*="domain_id="]').forEach((a) => {
+      const match = a.href.match(/domain_id=(\d+)/);
+      if (!match) return;
+      const domainId = match[1];
+      if (seen.has(domainId)) return;
+      seen.add(domainId);
+
+      // 找同行/父容器里的域名名称
+      const row = a.closest('tr') || a.closest('.domain-item') || a.closest('[class*="domain"]') || a.parentElement?.parentElement;
+      let name = '';
+      if (row) {
+        const nameEl = row.querySelector('td:first-child, .domain-name, [class*="domain-name"], h3, h4, .name, [class*="name"]');
+        if (nameEl) name = nameEl.textContent.trim();
+      }
+      // 如果 row 里没找到，尝试在 a 的前一个兄弟或父容器里找
+      if (!name) {
+        const prev = a.previousElementSibling;
+        if (prev) name = prev.textContent.trim();
+      }
+      results.push({ domainId, name });
+    });
+
+    // 策略2：找 data-domain-id 属性
+    if (results.length === 0) {
+      document.querySelectorAll('[data-domain-id]').forEach((el) => {
+        const domainId = el.getAttribute('data-domain-id');
+        if (!domainId || seen.has(domainId)) return;
+        seen.add(domainId);
+        const row = el.closest('tr') || el.closest('.domain-item') || el.parentElement?.parentElement;
+        let name = '';
+        if (row) {
+          const nameEl = row.querySelector('td:first-child, .domain-name, [class*="domain-name"], h3, h4');
+          if (nameEl) name = nameEl.textContent.trim();
+        }
+        results.push({ domainId, name });
+      });
+    }
+
+    return results;
+  }, browserCfg.selectors);
+
+  logger.info(`[${user.username}] 提取到 ${domains.length} 个域名`);
+  if (domains.length === 0) {
+    // 再次截图方便排查
+    await shoot(page, 'domain_list_empty');
+  }
+  return domains;
+}
+
+// ---------------------------------------------------------------------------
 // 单个域名续期
 // ---------------------------------------------------------------------------
 
-async function renewOneButton(page, cfg, user, btn) {
-  let detail = '';
-  try {
-    await btn.scrollIntoViewIfNeeded().catch(() => {});
-    await btn.click();
-    logger.info(`[${user.username}] 续期按钮已点击`);
-  } catch (e) {
-    return { status: 'failed', detail: `点击续期按钮失败: ${e.message}` };
-  }
+async function renewOneDomain(page, browserCfg, user, domain) {
+  const detailUrl = `https://my.dnshe.com/index.php?m=domain_hub&view=domain&domain_id=${domain.domainId}`;
+  await page.goto(detailUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await page.waitForTimeout(3000);
 
-  await sleep(1000);
-  await clickConfirmIfAppears(page, cfg, 2500);
+  // 截图：进入域名详情页
+  const detailThumb = await shoot(page, `domain_detail_${domain.domainId}`);
 
-  // Turnstile 检测与点击（最多 30 次，每次间隔 1s）
-  let cdpClicked = false;
-  for (let i = 0; i < 30; i++) {
-    if (await attemptTurnstile(page)) {
-      cdpClicked = true;
-      break;
-    }
-    await sleep(1000);
-  }
-  if (cdpClicked) {
-    logger.info(`[${user.username}] Turnstile 已点击，等待 Cloudflare 判定（最多 10s）...`);
-    for (let i = 0; i < 10; i++) {
-      if (await isTurnstileSuccess(page)) break;
-      await sleep(1000);
-    }
-  }
+  const sels = browserCfg.selectors;
 
-  // 结果判定
-  const sels = cfg.selectors;
-  let hit = await anyTextVisible(page, sels.successMarkers);
-  if (hit) return { status: 'success', detail: `检测到成功提示: ${hit}` };
-
-  hit = await anyTextVisible(page, sels.notReadyMarkers);
-  if (hit) return { status: 'notReady', detail: `尚未进入续期窗口（提示: ${hit}）` };
-
-  hit = await anyTextVisible(page, sels.captchaErrorMarkers);
-  if (hit) return { status: 'captcha', detail: `人机验证未通过（提示: ${hit}），需要刷新重试` };
-
-  return {
-    status: 'unconfirmed',
-    detail: '未检测到明确的成功 / 失败提示，请查看截图人工核对',
-  };
-}
-
-/** 循环处理页面上全部可续期域名 */
-async function renewAllDomains(page, cfg, user) {
-  const results = [];
-  const images = []; // 缩略图路径（用于 Telegram 图片推送）
-  for (let round = 0; round < 50; round++) {
-    const btn = await findRenewButton(page, cfg);
-    if (!btn) break; // 页面已无续期按钮
-
-    let verdict = { status: 'retry', detail: '' };
-    for (let retry = 1; retry <= 5 && verdict.status === 'retry'; retry++) {
-      if (retry > 1) {
-        logger.info(`[${user.username}] captcha 未通过，刷新页面重试（第 ${retry} 次）`);
-        await page.reload({ waitUntil: 'domcontentloaded' });
-        await page.waitForTimeout(3500);
-      }
-      const btnNow = await findRenewButton(page, cfg);
-      if (!btnNow) {
-        verdict = { status: 'none', detail: '刷新后未再发现续期按钮' };
+  // 点击"续期和域名详情" tab
+  let tabClicked = false;
+  for (const sel of sels.renewTabSelectors) {
+    try {
+      const loc = page.locator(sel).first();
+      if (await loc.isVisible({ timeout: 2000 })) {
+        await loc.click();
+        tabClicked = true;
+        logger.info(`[${user.username}] 已点击"续期和域名详情"tab（${domain.name}）`);
+        await page.waitForTimeout(2000);
         break;
       }
-      verdict = await renewOneButton(page, cfg, user, btnNow);
-      if (verdict.status === 'captcha') {
-        verdict = { status: 'retry', detail: verdict.detail };
+    } catch (e) {
+      /* 继续 */
+    }
+  }
+
+  if (!tabClicked) {
+    const thumb = await shoot(page, `domain_renew_tab_not_found_${domain.domainId}`);
+    return { status: 'failed', detail: `${domain.name}: 找不到"续期和域名详情"tab`, thumb };
+  }
+
+  // 截图：点击 tab 后
+  await shoot(page, `domain_renew_tab_${domain.domainId}`);
+
+  // 检查"当前不可续期"禁用按钮
+  for (const sel of sels.notRenewableSelectors) {
+    try {
+      const loc = page.locator(sel).first();
+      if (await loc.isVisible({ timeout: 2000 })) {
+        const isDisabled = await loc.evaluate((el) => el.disabled || el.getAttribute('disabled') || el.classList.contains('disabled')).catch(() => false);
+        if (isDisabled) {
+          const thumb = await shoot(page, `domain_not_renewable_${domain.domainId}`);
+          return { status: 'notReady', detail: `${domain.name}: 当前不可续期（按钮已禁用）`, thumb };
+        }
+      }
+    } catch (e) {
+      /* 继续 */
+    }
+  }
+
+  // 查找可点击的续期按钮
+  let renewBtn = null;
+  for (const sel of sels.renewActionButtons) {
+    try {
+      const loc = page.locator(sel).first();
+      if (await loc.isVisible({ timeout: 2000 })) {
+        const isDisabled = await loc.evaluate((el) => el.disabled || el.getAttribute('disabled') || el.classList.contains('disabled')).catch(() => false);
+        if (!isDisabled) {
+          renewBtn = loc;
+          break;
+        }
+      }
+    } catch (e) {
+      /* 继续 */
+    }
+  }
+
+  if (!renewBtn) {
+    const thumb = await shoot(page, `domain_no_renew_btn_${domain.domainId}`);
+    return { status: 'notReady', detail: `${domain.name}: 未找到可点击的续期按钮`, thumb };
+  }
+
+  // 点击续期按钮
+  try {
+    await renewBtn.scrollIntoViewIfNeeded().catch(() => {});
+    await renewBtn.click();
+    logger.info(`[${user.username}] 已点击续期按钮（${domain.name}）`);
+  } catch (e) {
+    const thumb = await shoot(page, `domain_renew_click_failed_${domain.domainId}`);
+    return { status: 'failed', detail: `${domain.name}: 点击续期按钮失败: ${e.message}`, thumb };
+  }
+
+  await sleep(2000);
+
+  // 处理可能的确认弹窗
+  for (const sel of sels.confirmSelectors) {
+    try {
+      const loc = page.locator(sel).first();
+      if (await loc.isVisible({ timeout: 1500 })) {
+        await loc.click();
+        logger.info(`[${user.username}] 已点击确认按钮（${domain.name}）`);
+        await sleep(1000);
+        break;
+      }
+    } catch (e) {
+      /* 继续 */
+    }
+  }
+
+  // 处理 Turnstile
+  for (let i = 0; i < 15; i++) {
+    if (await attemptTurnstile(page)) break;
+    await sleep(1000);
+  }
+  await sleep(3000);
+
+  // 截图：续期操作后
+  const afterThumb = await shoot(page, `domain_renew_after_${domain.domainId}`);
+
+  // 判定结果
+  const hitSuccess = await anyTextVisible(page, sels.successMarkers, 1000);
+  if (hitSuccess) {
+    return { status: 'success', detail: `${domain.name}: 续期成功（提示: ${hitSuccess}）`, thumb: afterThumb };
+  }
+
+  const hitFail = await anyTextVisible(page, sels.failMarkers, 1000);
+  if (hitFail) {
+    return { status: 'failed', detail: `${domain.name}: 续期失败（提示: ${hitFail}）`, thumb: afterThumb };
+  }
+
+  const hitNotReady = await anyTextVisible(page, sels.notReadyMarkers, 1000);
+  if (hitNotReady) {
+    return { status: 'notReady', detail: `${domain.name}: 尚未进入续期窗口（提示: ${hitNotReady}）`, thumb: afterThumb };
+  }
+
+  return { status: 'unconfirmed', detail: `${domain.name}: 续期结果未确认，请查看截图`, thumb: afterThumb };
+}
+
+// ---------------------------------------------------------------------------
+// 退出登录
+// ---------------------------------------------------------------------------
+
+async function logoutAccount(page, browserCfg, user) {
+  try {
+    // 点击右上角头像/用户名，打开下拉菜单
+    let clicked = false;
+    for (const sel of browserCfg.selectors.userMenuTriggers) {
+      try {
+        const loc = page.locator(sel).first();
+        if (await loc.isVisible({ timeout: 2000 })) {
+          await loc.click();
+          clicked = true;
+          await sleep(1500);
+          break;
+        }
+      } catch (e) {
+        /* 继续 */
       }
     }
-    if (verdict.status === 'retry') {
-      verdict = { status: 'failed', detail: '连续 5 次因验证码失败，已放弃（可能需人工处理滑块）' };
+
+    if (!clicked) {
+      logger.warn(`[${user.username}] 未找到用户菜单触发器，尝试直接访问 clientarea.php 退出`);
     }
 
-    results.push(verdict);
-    logger.info(
-      `[${user.username}] 域名 #${results.length} 续期结果: ${verdict.status} - ${verdict.detail}`
-    );
-    // 无论续期成功 / 失败 / 跳过，都截图留痕（缩略图 + 整页）
-    const thumb = await shoot(page, `renew_${results.length}_${verdict.status}`);
-    if (thumb) images.push(thumb);
-    await sleep(2000); // 页面状态稳定
-  }
+    // 点击"退出账户"
+    for (const sel of browserCfg.selectors.logoutButtons) {
+      try {
+        const loc = page.locator(sel).first();
+        if (await loc.isVisible({ timeout: 2000 })) {
+          await loc.click();
+          logger.info(`[${user.username}] 已点击退出账户`);
+          break;
+        }
+      } catch (e) {
+        /* 继续 */
+      }
+    }
 
-  if (results.length === 0) {
-    results.push({ status: 'none', detail: '页面未发现可续期的 "Free Renewal" 按钮（可能均已续期 / 未进入续期窗口 / 页面结构变化）' });
-    // "没有可续期项"同样要截图，方便人工确认页面状态
-    const thumb = await shoot(page, 'renew_0_none');
-    if (thumb) images.push(thumb);
+    // 等待 8 秒
+    await sleep(8000);
+
+    // 检查是否已退出（URL 应变为 clientarea.php）
+    const currentUrl = page.url();
+    if (!currentUrl.includes('clientarea.php')) {
+      logger.info(`[${user.username}] 未自动跳转到登录页，强制访问 clientarea.php`);
+      await page.goto(browserCfg.loginUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    }
+
+    // 截图：退出后
+    await shoot(page, 'after_logout');
+  } catch (e) {
+    logger.warn(`[${user.username}] 退出登录异常: ${e.message}`);
   }
-  return { results, images };
 }
 
 // ---------------------------------------------------------------------------
@@ -372,7 +496,9 @@ async function renewAllDomains(page, cfg, user) {
 
 async function runBrowserRenew(cfg, users) {
   process.env.NO_PROXY = 'localhost,127.0.0.1';
-  await launchNativeChrome(cfg.browser);
+  const browserCfg = cfg.browser;
+
+  await launchNativeChrome(browserCfg);
 
   const { chromium } = require('playwright-extra');
   const stealth = require('puppeteer-extra-plugin-stealth')();
@@ -381,7 +507,7 @@ async function runBrowserRenew(cfg, users) {
   let browser;
   for (let k = 0; k < 5; k++) {
     try {
-      browser = await chromium.connectOverCDP(`http://localhost:${cfg.browser.debugPort}`);
+      browser = await chromium.connectOverCDP(`http://localhost:${browserCfg.debugPort}`);
       logger.ok('[browser] 已通过 CDP 连接 Chrome');
       break;
     } catch (e) {
@@ -395,15 +521,14 @@ async function runBrowserRenew(cfg, users) {
 
   const report = [];
   let hasProblems = false;
-  const pushImages = []; // 汇总所有续期截图缩略图，随 Telegram 报告推送
+  const pushImages = []; // 汇总所有截图缩略图
 
   try {
     for (let i = 0; i < users.length; i++) {
       const user = users[i];
       logger.info(`\n===== 处理账号 ${i + 1}/${users.length}: ${user.username} =====`);
 
-      // 每个账号独立 context：避免上一个账号的登录态串用到下个账号，
-      // 导致误判"已登录"而跳过登录（多账号模式下必需）
+      // 每个账号独立 context
       let context;
       try {
         context = await browser.newContext();
@@ -415,33 +540,53 @@ async function runBrowserRenew(cfg, users) {
       await page.addInitScript(TURNSTILE_INJECT_SCRIPT);
 
       try {
-        const login = await ensureLoggedIn(page, cfg, user);
+        // 1. 登录
+        const login = await ensureLoggedIn(page, browserCfg, user);
         if (!login.ok) {
           logger.error(`[${user.username}] ${login.reason}`);
           report.push(`❌ ${user.username}: ${login.reason}`);
           hasProblems = true;
-          // 登录失败截图一并推送，便于人工核对
           if (login.thumb) pushImages.push(login.thumb);
           continue;
         }
 
-        // 回到域名管理页
-        await page.goto(cfg.browser.domainsUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-        await page.waitForTimeout(3500);
+        // 2. 获取域名列表
+        const domains = await fetchDomainList(page, browserCfg, user);
+        if (domains.length === 0) {
+          report.push(`⏭️ ${user.username}: 未找到任何域名`);
+          logger.info(`[${user.username}] 无域名需要处理`);
+        }
 
-        // 可选：点击确认框之外的“续期”入口已处理，直接扫描按钮
-        const { results: domainResults, images: domainImages } = await renewAllDomains(page, cfg, user);
-        for (const img of domainImages) pushImages.push(img);
-        for (const r of domainResults) {
-          if (r.status === 'success') {
-            report.push(`✅ ${user.username}: ${r.detail}`);
-          } else if (r.status === 'notReady' || r.status === 'none') {
-            report.push(`⏭️ ${user.username}: ${r.detail}`);
+        // 3. 逐个续期
+        for (let idx = 0; idx < domains.length; idx++) {
+          const domain = domains[idx];
+          logger.info(`[${user.username}] 处理域名 ${idx + 1}/${domains.length}: ${domain.name} (id=${domain.domainId})`);
+
+          const result = await renewOneDomain(page, browserCfg, user, domain);
+          if (result.thumb) pushImages.push(result.thumb);
+
+          if (result.status === 'success') {
+            report.push(`✅ ${user.username} / ${domain.name}: ${result.detail}`);
+          } else if (result.status === 'notReady') {
+            report.push(`⏭️ ${user.username} / ${domain.name}: ${result.detail}`);
+          } else if (result.status === 'failed') {
+            report.push(`❌ ${user.username} / ${domain.name}: ${result.detail}`);
+            hasProblems = true;
           } else {
-            report.push(`⚠️ ${user.username}: ${r.detail}`);
+            report.push(`⚠️ ${user.username} / ${domain.name}: ${result.detail}`);
             hasProblems = true;
           }
+
+          // 返回域名列表页（为下一个域名做准备）
+          if (idx < domains.length - 1) {
+            await page.goto(browserCfg.domainsUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+            await page.waitForTimeout(2000);
+          }
         }
+
+        // 4. 退出登录
+        await logoutAccount(page, browserCfg, user);
+
       } catch (err) {
         logger.error(`[${user.username}] 处理异常: ${err.message}`);
         report.push(`❌ ${user.username}: 异常 ${err.message}`);
@@ -458,7 +603,7 @@ async function runBrowserRenew(cfg, users) {
     }
   }
 
-  // 汇总推送到 Telegram（文本报告 + 截图缩略图，最多 6 张防止刷屏）
+  // 汇总推送
   const message = report.join('\n');
   logger.info('\n' + message);
   await pushReport(cfg.notify, {

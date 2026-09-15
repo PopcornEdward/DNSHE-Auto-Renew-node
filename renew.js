@@ -25,9 +25,13 @@ async function main() {
     process.exit(1);
   }
 
-  logger.info(`== DNSHE Auto Renew (${cfg.mode === 'browser' ? '浏览器引擎 CDP' : '官方 API 引擎'}) ==`);
+  // 自动兜底：若配置了 API 凭据则优先用 api（更稳定），否则 fallback 到 browser
+  const effectiveMode =
+    cfg.mode || (cfg.api.apiKey && cfg.api.apiSecret ? 'api' : 'browser');
 
-  if (cfg.mode === 'browser') {
+  logger.info(`== DNSHE Auto Renew (${effectiveMode === 'browser' ? '浏览器引擎 CDP' : '官方 API 引擎'}) ==`);
+
+  if (effectiveMode === 'browser') {
     const users = getUsers();
     if (users.length === 0) {
       const msg =

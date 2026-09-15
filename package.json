@@ -5,7 +5,7 @@
   "main": "renew.js",
   "scripts": {
     "start": "node renew.js",
-    "check": "node --check renew.js && node --check src/config.js && node --check src/logger.js && node --check src/notify.js && node --check src/inject.js && node --check src/turnstile.js && node --check src/browser-engine.js && node --check src/api-engine.js && node --check src/verify-code.js"
+    "check": "node --check renew.js && node --check src/config.js && node --check src/logger.js && node --check src/notify.js && node --check src/inject.js && node --check src/turnstile.js && node --check src/browser-engine.js && node --check src/api-engine.js && node --check src/verify-code.js && node --check src/totp-code.js"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -16,6 +16,7 @@
     "node-imap": "^0.9.6",
     "playwright": "^1.40.0",
     "playwright-extra": "^4.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2"
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "speakeasy": "^2.0.0"
   }
 }

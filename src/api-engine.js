@@ -43,6 +43,7 @@ class DnsheClient {
       'X-API-Key': this.cfg.apiKey,
       'X-API-Secret': this.cfg.apiSecret,
       'Content-Type': 'application/json',
+      'User-Agent': 'dnshe-auto-renew-node/1.0',
     };
   }
 

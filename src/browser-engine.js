@@ -29,6 +29,7 @@ const { TURNSTILE_INJECT_SCRIPT } = require('./inject');
 const { attemptTurnstile, isTurnstileSuccess } = require('./turnstile');
 const { pushReport } = require('./notify');
 const { getVerificationCode } = require('./verify-code');
+const { generateTOTP } = require('./totp-code');
 
 const SCREENSHOT_DIR = path.join(process.cwd(), 'screenshots');
 
@@ -358,25 +359,34 @@ async function verifyCodeAndSubmit(page, browserCfg) {
 
   const mailUser = mail.user || '';
   const mailAuth = mail.auth || '';
-  if (!mailUser || !mailAuth) {
-    logger.error('[verify] 未配置 MAIL_126_USER / MAIL_126_AUTH（126 邮箱授权码），无法自动获取验证码');
-    return false;
+  const totpSecret = browserCfg.totpSecret || '';
+
+  // 1. 获取验证码（双保险：优先 TOTP，fallback 到 IMAP 邮件）
+  let code = null;
+
+  // 策略 A: TOTP（本地生成，无次数限制，推荐）
+  if (totpSecret) {
+    logger.info('[verify] 优先使用 TOTP 生成验证码...');
+    code = generateTOTP(totpSecret);
   }
 
-  // 1. 从 126 邮箱读取验证码（内部带重试）
-  logger.info(`[verify] 从 ${mailUser} 读取 DNSHE 验证码...`);
-  const code = await getVerificationCode(mailUser, mailAuth, {
-    maxRetries: mail.maxRetries || 15,
-    retryInterval: mail.retryInterval || 3000,
-    imapServer: mail.server,
-    imapPort: mail.port,
-  }).catch((e) => {
-    logger.error(`[verify] 读取验证码异常: ${e.message}`);
-    return null;
-  });
+  // 策略 B: IMAP 读取 126 邮箱（TOTP 未配置或生成失败时 fallback）
+  if (!code && mailUser && mailAuth) {
+    logger.info(`[verify] TOTP 不可用，fallback 到 IMAP 读取 126 邮箱验证码...`);
+    code = await getVerificationCode(mailUser, mailAuth, {
+      maxRetries: mail.maxRetries || 15,
+      retryInterval: mail.retryInterval || 3000,
+      imapServer: mail.server,
+      imapPort: mail.port,
+    }).catch((e) => {
+      logger.error(`[verify] IMAP 读取验证码异常: ${e.message}`);
+      return null;
+    });
+  }
 
   if (!code) {
-    logger.error('[verify] 未能获取验证码');
+    logger.error('[verify] 未能获取验证码（TOTP 未配置且 IMAP 未配置或失败）');
+    logger.error('[verify] 解决方案：① 配置 DNSHE_TOTP_SECRET（推荐）；② 或配置 MAIL_126_USER + MAIL_126_AUTH');
     return false;
   }
 

@@ -231,66 +231,12 @@ function browserConfig() {
     debugPort,
     headless,
     selectors: SELECTORS,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// 账号来源：USERS_JSON > users.json > DNSHE_USERNAME/DNSHE_PASSWORD
-// ---------------------------------------------------------------------------
-function normalizeUser(raw) {
-  if (!raw || typeof raw !== 'object') return null;
-  const username = raw.username || raw.email || raw.user || raw.name || raw.account || '';
-  const password = raw.password || raw.pass || raw.pwd || raw.secret || '';
-  if (!username || !password) return null;
-  return { username, password };
-}
-
-function browserUsers() {
-  let list = null;
-
-  const json = parseJsonEnv('USERS_JSON', null, '多账号模式仅支持浏览器引擎');
-  if (Array.isArray(json) && json.length > 0) list = json;
-
-  if (!list) {
-    const file = path.join(process.cwd(), 'users.json');
-    if (fs.existsSync(file)) {
-      try {
-        const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-        const arr = Array.isArray(data) ? data : data.users;
-        if (Array.isArray(arr) && arr.length > 0) list = arr;
-      } catch (e) {
-        logger_warn(`读取 users.json 失败: ${e.message}`);
-      }
-    }
-  }
-
-  if (list) {
-    const normalized = list.map(normalizeUser).filter(Boolean);
-    if (normalized.length > 0) return normalized;
-    logger_warn('USERS_JSON/users.json 中的账号对象缺少 username/email 或 password 字段');
-  }
-
-  const u = text('DNSHE_USERNAME');
-  const p = text('DNSHE_PASSWORD');
-  if (u && p) return [{ username: u, password: p }];
-  return [];
-}
-
-// ---------------------------------------------------------------------------
-// API 引擎配置
-// ---------------------------------------------------------------------------
-function apiConfig() {
-  return {
-    baseUrl: text('DNSHE_API_BASE_URL') || BASE_URL,
-    apiKey: text('DNSHE_API_KEY'),
-    apiSecret: text('DNSHE_API_SECRET'),
-    thresholdDays: Math.round(number('DNSHE_RENEW_THRESHOLD_DAYS', DEFAULT_THRESHOLD_DAYS)),
-    minInterval: number('DNSHE_MIN_INTERVAL', 2),
-    tzOffsetHours: number('DNSHE_TZ_OFFSET', 8),
     listFields: LIST_FIELDS,
     pageSize: PAGE_SIZE,
     maxPages: MAX_PAGES,
     benignErrorCodes: BENIGN_ERROR_CODES,
+    // TOTP 密钥（推荐，替代 IMAP 邮件读取）
+    totpSecret: text('DNSHE_TOTP_SECRET'),
   };
 }
 

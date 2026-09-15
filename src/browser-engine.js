@@ -73,6 +73,8 @@ async function launchNativeChrome(cfg) {
     '--disable-blink-features=AutomationControlled',
     '--disable-features=AutomationControlled',
     '--window-size=1280,900',
+    '--lang=zh-CN',
+    '--accept-lang=zh-CN,zh',
   ];
   if (cfg.headless) args.push('--headless=new');
 
@@ -90,6 +92,80 @@ async function launchNativeChrome(cfg) {
     await sleep(1000);
   }
   throw new Error(`Chrome 启动失败（端口 ${cfg.debugPort} 未就绪），请检查 CHROME_PATH`);
+}
+
+// ---------------------------------------------------------------------------
+// 语言切换（DNSHE 支持中英文，若页面为英文则切回中文使选择器生效）
+// ---------------------------------------------------------------------------
+
+/** 安全追加语言参数到 URL（DNSHE 格式: autolang=1&language=chinese） */
+function appendLangParam(url) {
+  if (!url) return url;
+  // 先清除已有的语言参数，避免重复
+  const clean = url
+    .replace(/[?&]autolang=[^&]*/g, '')
+    .replace(/[?&]language=[^&]*/g, '');
+  const sep = clean.includes('?') ? '&' : '?';
+  return `${clean}${sep}autolang=1&language=chinese`;
+}
+
+async function switchToChinese(page) {
+  try {
+    // Step 1: 检测当前是否为英文界面
+    const englishMarkers = [
+      { sel: 'text="English"', name: 'English 按钮' },
+      { sel: 'button:has-text("Sign In")', name: 'Sign In 按钮' },
+      { sel: 'text="Welcome Back"', name: 'Welcome Back 文本' },
+      { sel: 'text="Client Area"', name: 'Client Area 文本' },
+    ];
+    let isEnglish = false;
+    for (const m of englishMarkers) {
+      try {
+        if (await page.locator(m.sel).first().isVisible({ timeout: 1000 })) {
+          isEnglish = true;
+          logger.info(`[lang] 检测到英文界面特征: ${m.name}`);
+          break;
+        }
+      } catch (e) { /* 继续 */ }
+    }
+    if (!isEnglish) {
+      logger.info('[lang] 未检测到英文界面特征，假设已是中文');
+      return;
+    }
+
+    // Step 2: 直接通过 URL 参数切换语言（不依赖 UI 点击）
+    const newUrl = appendLangParam(page.url());
+
+    logger.info(`[lang] 通过 URL 参数切换语言: ${newUrl}`);
+    await page.goto(newUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await sleep(3000);
+
+    // Step 3: 确认是否已切换
+    const chineseMarkers = [
+      { sel: 'text="简体中文"', name: '语言按钮显示简体中文' },
+      { sel: 'button:has-text("登录")', name: '登录按钮' },
+      { sel: 'text="欢迎回来"', name: '欢迎回来' },
+      { sel: 'text="我的域名"', name: '我的域名' },
+      { sel: 'text="注册新域名"', name: '注册新域名' },
+    ];
+    let isChinese = false;
+    for (const m of chineseMarkers) {
+      try {
+        if (await page.locator(m.sel).first().isVisible({ timeout: 1500 })) {
+          isChinese = true;
+          logger.info(`[lang] 检测到中文界面特征: ${m.name}`);
+          break;
+        }
+      } catch (e) { /* 继续 */ }
+    }
+    if (isChinese) {
+      logger.ok('[lang] 页面已切换为中文');
+    } else {
+      logger.warn('[lang] 语言切换后未检测到中文特征');
+    }
+  } catch (e) {
+    logger.warn(`[lang] 语言切换异常: ${e.message}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -173,8 +249,10 @@ async function shoot(page, tag) {
 // ---------------------------------------------------------------------------
 
 async function ensureLoggedIn(page, browserCfg, user) {
-  await page.goto(browserCfg.loginUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await page.waitForTimeout(3000);
+  const loginUrlWithLang = appendLangParam(browserCfg.loginUrl);
+  await page.goto(loginUrlWithLang, { waitUntil: 'networkidle', timeout: 60000 });
+  await page.waitForTimeout(2000);
+  await switchToChinese(page);
 
   // 如果已经在 dashboard（没有登录表单），可能是 cookie 未过期
   if (!(await detectLoginForm(page, browserCfg))) {
@@ -224,6 +302,7 @@ async function ensureLoggedIn(page, browserCfg, user) {
       const onDashboard = await anyTextVisible(page, ['欢迎回来', '我的域名', '控制台概览', 'Welcome back'], 500);
       if (onDashboard) {
         logger.ok(`[${user.username}] 登录成功`);
+        await switchToChinese(page);
         await shoot(page, 'after_login');
         return { ok: true };
       }
@@ -239,8 +318,11 @@ async function ensureLoggedIn(page, browserCfg, user) {
 // ---------------------------------------------------------------------------
 
 async function fetchDomainList(page, browserCfg, user) {
-  await page.goto(browserCfg.domainsUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  const domainsUrlWithLang = appendLangParam(browserCfg.domainsUrl);
+  await page.goto(domainsUrlWithLang, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForTimeout(3500);
+
+  await switchToChinese(page);
 
   // 截图：域名列表页
   await shoot(page, 'domain_list');
@@ -439,48 +521,58 @@ async function renewOneDomain(page, browserCfg, user, domain) {
 
 async function logoutAccount(page, browserCfg, user) {
   try {
-    // 点击右上角头像/用户名，打开下拉菜单
-    let clicked = false;
-    for (const sel of browserCfg.selectors.userMenuTriggers) {
-      try {
-        const loc = page.locator(sel).first();
-        if (await loc.isVisible({ timeout: 2000 })) {
-          await loc.click();
-          clicked = true;
-          await sleep(1500);
-          break;
-        }
-      } catch (e) {
-        /* 继续 */
-      }
+    // 策略 1：直接访问 logout.php（最可靠，不依赖 UI 选择器）
+    const logoutUrl = 'https://my.dnshe.com/logout.php';
+    try {
+      await page.goto(logoutUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      logger.info(`[${user.username}] 已访问 logout.php 退出`);
+      await sleep(4000);
+    } catch (e) {
+      logger.warn(`[${user.username}] 访问 logout.php 失败: ${e.message}，回退到 UI 点击`);
     }
 
-    if (!clicked) {
-      logger.warn(`[${user.username}] 未找到用户菜单触发器，尝试直接访问 clientarea.php 退出`);
-    }
-
-    // 点击"退出账户"
-    for (const sel of browserCfg.selectors.logoutButtons) {
-      try {
-        const loc = page.locator(sel).first();
-        if (await loc.isVisible({ timeout: 2000 })) {
-          await loc.click();
-          logger.info(`[${user.username}] 已点击退出账户`);
-          break;
-        }
-      } catch (e) {
-        /* 继续 */
-      }
-    }
-
-    // 等待 8 秒
-    await sleep(8000);
-
-    // 检查是否已退出（URL 应变为 clientarea.php）
+    // 策略 2：若 logout.php 未生效，尝试 UI 点击退出
     const currentUrl = page.url();
     if (!currentUrl.includes('clientarea.php')) {
+      // 点击右上角头像/用户名，打开下拉菜单
+      let clicked = false;
+      for (const sel of browserCfg.selectors.userMenuTriggers) {
+        try {
+          const loc = page.locator(sel).first();
+          if (await loc.isVisible({ timeout: 2000 })) {
+            await loc.click();
+            clicked = true;
+            await sleep(1500);
+            break;
+          }
+        } catch (e) {
+          /* 继续 */
+        }
+      }
+
+      // 点击"退出账户"
+      for (const sel of browserCfg.selectors.logoutButtons) {
+        try {
+          const loc = page.locator(sel).first();
+          if (await loc.isVisible({ timeout: 2000 })) {
+            await loc.click();
+            logger.info(`[${user.username}] 已点击退出账户`);
+            break;
+          }
+        } catch (e) {
+          /* 继续 */
+        }
+      }
+
+      await sleep(6000);
+    }
+
+    // 策略 3：仍未退出则强制访问登录页
+    const finalUrl = page.url();
+    if (!finalUrl.includes('clientarea.php')) {
       logger.info(`[${user.username}] 未自动跳转到登录页，强制访问 clientarea.php`);
       await page.goto(browserCfg.loginUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await sleep(2000);
     }
 
     // 截图：退出后

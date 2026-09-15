@@ -388,20 +388,34 @@ async function verifyCodeAndSubmit(page, browserCfg) {
   }
 
   // 3. 填码：6 个独立输入格（OTP 分格）或单个输入框
+  // 注意：必须过滤掉 type="hidden" 的 CSRF token 等隐藏字段
   const allInputs = sels.verifyCodeInputs.join(',');
-  const totalInputs = await page.locator(allInputs).count().catch(() => 0);
+  const allHandles = await page.locator(allInputs).elementHandles();
+  const visibleHandles = [];
+  for (const h of allHandles) {
+    const type = await h.getAttribute('type').catch(() => '');
+    if (type !== 'hidden') visibleHandles.push(h);
+  }
+  const totalInputs = visibleHandles.length;
   const digits = code.split('');
+
   if (totalInputs >= 4 && totalInputs <= 8) {
-    const boxes = page.locator(allInputs);
-    for (let d = 0; d < digits.length; d++) {
-      await boxes.nth(d).fill(digits[d]).catch((e) => {
-        logger.warn(`[verify] 第 ${d + 1} 格填入失败: ${e.message}`);
+    for (let d = 0; d < digits.length && d < totalInputs; d++) {
+      await visibleHandles[d].fill(digits[d]).catch((e) => {
+        logger.warn(`[verify] 第 ${d + 1} 格 Playwright fill 失败: ${e.message}，fallback 直接设置 value`);
+        visibleHandles[d].evaluate((el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); }, digits[d]).catch(() => {});
       });
     }
-    logger.info(`[verify] 已按 ${digits.length} 个输入格填入验证码`);
-  } else {
-    await inputLoc.fill(code);
+    logger.info(`[verify] 已按 ${Math.min(digits.length, totalInputs)} 个输入格填入验证码`);
+  } else if (totalInputs >= 1) {
+    await visibleHandles[0].fill(code).catch((e) => {
+      logger.warn(`[verify] Playwright fill 失败: ${e.message}，fallback 直接设置 value`);
+      visibleHandles[0].evaluate((el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); }, code).catch(() => {});
+    });
     logger.info(`[verify] 已填入验证码: ${code}`);
+  } else {
+    logger.error('[verify] 未找到可见的验证码输入框');
+    return false;
   }
 
   await sleep(800);

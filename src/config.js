@@ -194,19 +194,37 @@ function browserConfig() {
 // ---------------------------------------------------------------------------
 // 账号来源：USERS_JSON > users.json > DNSHE_USERNAME/DNSHE_PASSWORD
 // ---------------------------------------------------------------------------
-function browserUsers() {
-  const json = parseJsonEnv('USERS_JSON', null, '多账号模式仅支持浏览器引擎');
-  if (Array.isArray(json) && json.length > 0) return json;
+function normalizeUser(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const username = raw.username || raw.email || raw.user || raw.name || raw.account || '';
+  const password = raw.password || raw.pass || raw.pwd || raw.secret || '';
+  if (!username || !password) return null;
+  return { username, password };
+}
 
-  const file = path.join(process.cwd(), 'users.json');
-  if (fs.existsSync(file)) {
-    try {
-      const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-      const list = Array.isArray(data) ? data : data.users;
-      if (Array.isArray(list) && list.length > 0) return list;
-    } catch (e) {
-      logger_warn(`读取 users.json 失败: ${e.message}`);
+function browserUsers() {
+  let list = null;
+
+  const json = parseJsonEnv('USERS_JSON', null, '多账号模式仅支持浏览器引擎');
+  if (Array.isArray(json) && json.length > 0) list = json;
+
+  if (!list) {
+    const file = path.join(process.cwd(), 'users.json');
+    if (fs.existsSync(file)) {
+      try {
+        const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+        const arr = Array.isArray(data) ? data : data.users;
+        if (Array.isArray(arr) && arr.length > 0) list = arr;
+      } catch (e) {
+        logger_warn(`读取 users.json 失败: ${e.message}`);
+      }
     }
+  }
+
+  if (list) {
+    const normalized = list.map(normalizeUser).filter(Boolean);
+    if (normalized.length > 0) return normalized;
+    logger_warn('USERS_JSON/users.json 中的账号对象缺少 username/email 或 password 字段');
   }
 
   const u = text('DNSHE_USERNAME');

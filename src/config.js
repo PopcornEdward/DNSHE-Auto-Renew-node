@@ -259,6 +259,48 @@ function browserConfig() {
 }
 
 // ---------------------------------------------------------------------------
+// 账号来源：USERS_JSON > users.json > DNSHE_USERNAME/DNSHE_PASSWORD
+// ---------------------------------------------------------------------------
+function normalizeUser(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const username = raw.username || raw.email || raw.user || raw.name || raw.account || '';
+  const password = raw.password || raw.pass || raw.pwd || raw.secret || '';
+  if (!username || !password) return null;
+  return { username, password };
+}
+
+function browserUsers() {
+  let list = null;
+
+  const json = parseJsonEnv('USERS_JSON', null, '多账号模式仅支持浏览器引擎');
+  if (Array.isArray(json) && json.length > 0) list = json;
+
+  if (!list) {
+    const file = path.join(process.cwd(), 'users.json');
+    if (fs.existsSync(file)) {
+      try {
+        const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+        const arr = Array.isArray(data) ? data : data.users;
+        if (Array.isArray(arr) && arr.length > 0) list = arr;
+      } catch (e) {
+        logger_warn(`读取 users.json 失败: ${e.message}`);
+      }
+    }
+  }
+
+  if (list) {
+    const normalized = list.map(normalizeUser).filter(Boolean);
+    if (normalized.length > 0) return normalized;
+    logger_warn('USERS_JSON/users.json 中的账号对象缺少 username/email 或 password 字段');
+  }
+
+  const u = text('DNSHE_USERNAME');
+  const p = text('DNSHE_PASSWORD');
+  if (u && p) return [{ username: u, password: p }];
+  return [];
+}
+
+// ---------------------------------------------------------------------------
 // 推送通知配置（用户自部署的 substracker / 通用 Webhook / Telegram）
 // ---------------------------------------------------------------------------
 function notifyConfig() {
@@ -291,7 +333,11 @@ function mailConfig() {
 // 汇总导出
 // ---------------------------------------------------------------------------
 function loadConfig() {
-  const mode = text('DNSHE_MODE') || 'browser';
+  let mode = text('DNSHE_MODE');
+  // 未显式配置 mode 时，自动检测 API 凭据：有则优先 api，否则 browser
+  if (!mode) {
+    mode = (text('DNSHE_API_KEY') && text('DNSHE_API_SECRET')) ? 'api' : 'browser';
+  }
   if (mode !== 'browser' && mode !== 'api') {
     throw new Error(`DNSHE_MODE 取值非法: ${mode}（仅支持 browser / api）`);
   }
@@ -304,7 +350,11 @@ function loadConfig() {
   };
 }
 
-function getUsers() {
+function getUsers(mode) {
+  if (mode === 'api') {
+    // API 模式不需要浏览器账号列表
+    return [];
+  }
   return browserUsers();
 }
 

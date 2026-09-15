@@ -25,14 +25,10 @@ async function main() {
     process.exit(1);
   }
 
-  // 自动兜底：若配置了 API 凭据则优先用 api（更稳定），否则 fallback 到 browser
-  const effectiveMode =
-    cfg.mode || (cfg.api.apiKey && cfg.api.apiSecret ? 'api' : 'browser');
+  logger.info(`== DNSHE Auto Renew (${cfg.mode === 'browser' ? '浏览器引擎 CDP' : '官方 API 引擎'}) ==`);
 
-  logger.info(`== DNSHE Auto Renew (${effectiveMode === 'browser' ? '浏览器引擎 CDP' : '官方 API 引擎'}) ==`);
-
-  if (effectiveMode === 'browser') {
-    const users = getUsers();
+  if (cfg.mode === 'browser') {
+    const users = getUsers('browser');
     if (users.length === 0) {
       const msg =
         '❌ 未配置任何账号：请在 Secrets 中设置 USERS_JSON（多账号）或\n' +

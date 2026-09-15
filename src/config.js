@@ -201,6 +201,24 @@ function logger_warn(msg) {
 }
 
 // ---------------------------------------------------------------------------
+// 官方 API 引擎配置
+// ---------------------------------------------------------------------------
+function apiConfig() {
+  return {
+    baseUrl: text('DNSHE_API_BASE') || BASE_URL,
+    apiKey: text('DNSHE_API_KEY'),
+    apiSecret: text('DNSHE_API_SECRET'),
+    thresholdDays: number('DNSHE_RENEW_THRESHOLD_DAYS', DEFAULT_THRESHOLD_DAYS),
+    minInterval: number('DNSHE_MIN_INTERVAL', 2),
+    tzOffset: number('DNSHE_TZ_OFFSET', 8),
+    listFields: LIST_FIELDS,
+    pageSize: PAGE_SIZE,
+    maxPages: MAX_PAGES,
+    benignErrorCodes: BENIGN_ERROR_CODES,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 浏览器引擎配置
 // ---------------------------------------------------------------------------
 function detectChromePath() {

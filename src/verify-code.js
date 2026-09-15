@@ -84,11 +84,19 @@ function _fetchCode({ user, authCode, imapServer, imapPort }) {
       if (resolved) return;
       resolved = true;
       try { imap.end(); } catch (e) { /* ignore */ }
-      if (err) reject(err);
-      else resolve(result);
+      if (err) {
+        // 包装空 message 的错误，确保日志可读
+        if (!err || !err.message) {
+          err = new Error(String(err) || 'IMAP 未知错误（空 message）');
+        }
+        reject(err);
+      } else {
+        resolve(result);
+      }
     }
 
     imap.once('ready', () => {
+      logger.info('[verify] IMAP 连接就绪');
       try {
         // 网易系邮箱必须发送 ID 命令（RFC 2971）
         const idInfo = {
@@ -101,29 +109,35 @@ function _fetchCode({ user, authCode, imapServer, imapPort }) {
           if (idErr) {
             logger.warn(`[verify] ID 命令失败: ${idErr.message}`);
             // ID 失败不一定致命，继续尝试
+          } else {
+            logger.info('[verify] ID 命令发送成功');
           }
 
           imap.openBox('INBOX', false, (boxErr, box) => {
             if (boxErr) {
+              logger.error(`[verify] 打开 INBOX 失败: ${boxErr.message}`);
               return finish(boxErr);
             }
+            logger.info(`[verify] 打开 INBOX 成功，共 ${box.messages.total} 封邮件`);
 
-            // 搜索当天未读邮件
+            // 搜索当天邮件（不限制 UNSEEN，防止邮件被其他客户端读过）
             const today = new Date();
             const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
               'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
             const dateStr = `${today.getDate()}-${monthNames[today.getMonth()]}-${today.getFullYear()}`;
 
-            imap.search(['UNSEEN', ['ON', dateStr]], (searchErr, results) => {
+            logger.info(`[verify] 搜索当天邮件: ON ${dateStr}`);
+            imap.search([['ON', dateStr]], (searchErr, results) => {
               if (searchErr) {
+                logger.error(`[verify] 搜索邮件失败: ${searchErr.message}`);
                 return finish(searchErr);
               }
               if (!results || results.length === 0) {
-                logger.info('[verify] 未找到当天未读邮件');
+                logger.info('[verify] 未找到当天邮件');
                 return finish(null, null);
               }
 
-              logger.info(`[verify] 找到 ${results.length} 封当天未读邮件`);
+              logger.info(`[verify] 找到 ${results.length} 封当天邮件`);
 
               // 从最新邮件开始遍历（results 通常按 seqno 升序，倒序处理）
               let foundCode = null;
@@ -185,7 +199,7 @@ function _fetchCode({ user, authCode, imapServer, imapPort }) {
 
                       if (code) {
                         foundCode = code;
-                        // 仅标记已读（不删除邮件），防止下次被当作未读验证码再次读取
+                        // 标记已读（不删除邮件），防止下次重复读取
                         try {
                           imap.addFlags(seqno, '\\Seen', () => {});
                         } catch (e) { /* ignore */ }
@@ -208,12 +222,14 @@ function _fetchCode({ user, authCode, imapServer, imapPort }) {
               });
 
               f.once('error', (fetchErr) => {
+                logger.error(`[verify] 获取邮件内容失败: ${fetchErr.message || fetchErr}`);
                 finish(fetchErr);
               });
 
               f.once('end', () => {
                 // 如果所有邮件都处理完但没找到验证码
                 if (processed >= results.length && !foundCode) {
+                  logger.info('[verify] 所有邮件处理完毕，未找到验证码');
                   finish(null, null);
                 }
               });
@@ -221,20 +237,24 @@ function _fetchCode({ user, authCode, imapServer, imapPort }) {
           });
         });
       } catch (e) {
+        logger.error(`[verify] IMAP ready 回调异常: ${e.message || e}`);
         finish(e);
       }
     });
 
     imap.once('error', (err) => {
+      logger.error(`[verify] IMAP 连接错误: ${err && err.message ? err.message : String(err)}`);
       finish(err);
     });
 
     imap.once('end', () => {
       if (!resolved) {
+        logger.warn('[verify] IMAP 连接意外关闭');
         finish(new Error('IMAP 连接意外关闭'));
       }
     });
 
+    logger.info(`[verify] 正在连接 ${imapServer}:${imapPort}...`);
     imap.connect();
   });
 }

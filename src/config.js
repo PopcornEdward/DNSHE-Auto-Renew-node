@@ -47,7 +47,9 @@ const SELECTORS = {
     'input[placeholder*="Password" i]',
   ],
   loginButtons: [
+    'button:has-text("登录账户")',
     'button:has-text("Sign In")',
+    'button:has-text("登录")',
     'button[type="submit"]',
     'input[type="submit"]',
   ],
@@ -100,6 +102,47 @@ const SELECTORS = {
     'button:has-text("确定")',
     'button:has-text("Confirm")',
     '.btn:has-text("确认")',
+  ],
+
+  // ---- 邮箱验证码（DNSHE 安全验证弹窗/页面） ----
+  // 特征文本：出现则说明 DNSHE 触发邮箱安全验证
+  verifyTitleTexts: [
+    '安全验证',
+    'Security Verification',
+    '验证码已发送',
+    '请输入验证码',
+    '邮件验证码',
+    'Verify your identity',
+  ],
+  // "记住此设备60天" 勾选框（若存在）
+  rememberDeviceCheckboxes: [
+    'input[type="checkbox"]',
+    'input[name*="remember" i]',
+    'input[id*="remember" i]',
+    'input[type="checkbox"][value="1"]',
+  ],
+  // 验证码输入框：可能是 6 个独立输入格，也可能是单个输入框
+  verifyCodeInputs: [
+    'input[inputmode="numeric"]',
+    'input[name*="code" i]',
+    'input[id*="code" i]',
+    'input[data-index]',
+    '.otp-input input',
+    '.otp-input',
+    '.code-input input',
+    '.verify-code input',
+    'input[placeholder*="验证码" i]',
+    'input[placeholder*="code" i]',
+    'input[maxlength="6"]',
+    'input[autocomplete="one-time-code"]',
+  ],
+  // 验证码提交按钮
+  verifySubmitButtons: [
+    'button:has-text("验证并继续")',
+    'button:has-text("Verify and Continue")',
+    'button:has-text("提交")',
+    'button:has-text("确认")',
+    'button[type="submit"]',
   ],
 
   // ---- 退出登录 ----
@@ -267,6 +310,20 @@ function notifyConfig() {
 }
 
 // ---------------------------------------------------------------------------
+// 126 邮箱验证码配置（DNSHE 触发邮箱安全验证时自动读取）
+// ---------------------------------------------------------------------------
+function mailConfig() {
+  return {
+    user: text('MAIL_126_USER'),
+    auth: text('MAIL_126_AUTH'), // 授权码，不是邮箱登录密码
+    server: text('MAIL_IMAP_SERVER') || 'imap.126.com',
+    port: number('MAIL_IMAP_PORT', 993),
+    maxRetries: number('MAIL_VERIFY_MAX_RETRIES', 15),
+    retryInterval: number('MAIL_VERIFY_RETRY_INTERVAL', 3000),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 汇总导出
 // ---------------------------------------------------------------------------
 function loadConfig() {
@@ -279,6 +336,7 @@ function loadConfig() {
     browser: browserConfig(),
     api: apiConfig(),
     notify: notifyConfig(),
+    mail: mailConfig(),
   };
 }
 

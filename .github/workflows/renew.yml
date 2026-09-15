@@ -54,6 +54,9 @@ jobs:
           # ---- 可选：Telegram 直推（TG_BOT_TOKEN + TG_CHAT_ID，未配置则跳过）----
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          # ---- 126 邮箱验证码（DNSHE 触发邮箱安全验证时自动读取，强烈建议配置）----
+          MAIL_126_USER: ${{ secrets.MAIL_126_USER }}
+          MAIL_126_AUTH: ${{ secrets.MAIL_126_AUTH }}
           # ---- 可选：续期阈值（默认 180 天）----
           DNSHE_RENEW_THRESHOLD_DAYS: ${{ secrets.DNSHE_RENEW_THRESHOLD_DAYS }}
         run: xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node renew.js

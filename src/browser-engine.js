@@ -28,6 +28,7 @@ const logger = require('./logger');
 const { TURNSTILE_INJECT_SCRIPT } = require('./inject');
 const { attemptTurnstile, isTurnstileSuccess } = require('./turnstile');
 const { pushReport } = require('./notify');
+const { getVerificationCode } = require('./verify-code');
 
 const SCREENSHOT_DIR = path.join(process.cwd(), 'screenshots');
 
@@ -111,23 +112,19 @@ function appendLangParam(url) {
 
 async function switchToChinese(page) {
   try {
-    // Step 1: 检测当前是否为英文界面
-    const englishMarkers = [
-      { sel: 'text="English"', name: 'English 按钮' },
-      { sel: 'button:has-text("Sign In")', name: 'Sign In 按钮' },
-      { sel: 'text="Welcome Back"', name: 'Welcome Back 文本' },
-      { sel: 'text="Client Area"', name: 'Client Area 文本' },
-    ];
+    // Step 1: 检测当前是否为英文界面（DOM 内文本搜索，避免 locator 卡死）
+    const englishTexts = ['English', 'Sign In', 'Welcome Back', 'Client Area'];
     let isEnglish = false;
-    for (const m of englishMarkers) {
-      try {
-        if (await page.locator(m.sel).first().isVisible({ timeout: 1000 })) {
+    try {
+      const bodyText = await page.evaluate(() => document.body?.innerText || '');
+      for (const txt of englishTexts) {
+        if (bodyText.includes(txt)) {
           isEnglish = true;
-          logger.info(`[lang] 检测到英文界面特征: ${m.name}`);
+          logger.info(`[lang] 检测到英文界面特征: ${txt}`);
           break;
         }
-      } catch (e) { /* 继续 */ }
-    }
+      }
+    } catch (e) { /* 忽略 */ }
     if (!isEnglish) {
       logger.info('[lang] 未检测到英文界面特征，假设已是中文');
       return;
@@ -140,24 +137,19 @@ async function switchToChinese(page) {
     await page.goto(newUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await sleep(3000);
 
-    // Step 3: 确认是否已切换
-    const chineseMarkers = [
-      { sel: 'text="简体中文"', name: '语言按钮显示简体中文' },
-      { sel: 'button:has-text("登录")', name: '登录按钮' },
-      { sel: 'text="欢迎回来"', name: '欢迎回来' },
-      { sel: 'text="我的域名"', name: '我的域名' },
-      { sel: 'text="注册新域名"', name: '注册新域名' },
-    ];
+    // Step 3: 确认是否已切换（DOM 文本搜索）
+    const chineseTexts = ['简体中文', '登录', '欢迎回来', '我的域名', '注册新域名'];
     let isChinese = false;
-    for (const m of chineseMarkers) {
-      try {
-        if (await page.locator(m.sel).first().isVisible({ timeout: 1500 })) {
+    try {
+      const bodyText = await page.evaluate(() => document.body?.innerText || '');
+      for (const txt of chineseTexts) {
+        if (bodyText.includes(txt)) {
           isChinese = true;
-          logger.info(`[lang] 检测到中文界面特征: ${m.name}`);
+          logger.info(`[lang] 检测到中文界面特征: ${txt}`);
           break;
         }
-      } catch (e) { /* 继续 */ }
-    }
+      }
+    } catch (e) { /* 忽略 */ }
     if (isChinese) {
       logger.ok('[lang] 页面已切换为中文');
     } else {
@@ -172,13 +164,24 @@ async function switchToChinese(page) {
 // 页面辅助
 // ---------------------------------------------------------------------------
 
-/** 依次尝试候选选择器，返回第一个可见元素（无则 null） */
-async function findVisible(page, selectors, timeoutMs = 3000) {
+/** 依次尝试候选选择器，返回第一个存在且 likely 可用的元素（无则 null）。
+ *  无头 xvfb 环境下 visibility 判断可能超时，这里放宽为 count>0 即认为可用。
+ */
+async function findVisible(page, selectors, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
   for (const sel of selectors) {
     const loc = page.locator(sel).first();
     try {
-      await loc.waitFor({ state: 'visible', timeout: timeoutMs });
-      return loc;
+      // 先快速轮询 count（不卡 waitFor visible）
+      while (Date.now() < deadline) {
+        const cnt = await loc.count().catch(() => 0);
+        if (cnt > 0) {
+          // 额外等 300ms 让元素稳定，但不再检查 visible（xvfb 下可能误判）
+          await sleep(300);
+          return loc;
+        }
+        await sleep(400);
+      }
     } catch (e) {
       /* 尝试下一个 */
     }
@@ -187,19 +190,23 @@ async function findVisible(page, selectors, timeoutMs = 3000) {
 }
 
 async function fillFirstVisible(page, selectors, value, what) {
+  logger.info(`[login] 查找 ${what} 输入框...`);
   const loc = await findVisible(page, selectors);
   if (!loc) {
     throw new Error(`找不到${what}输入框（已尝试: ${selectors.join(' | ')}）`);
   }
+  logger.info(`[login] 填写 ${what}...`);
   await loc.fill(value);
   return loc;
 }
 
 async function clickFirstVisible(page, selectors, what) {
+  logger.info(`[login] 查找 ${what} 按钮...`);
   const loc = await findVisible(page, selectors);
   if (!loc) {
     throw new Error(`找不到${what}（已尝试: ${selectors.join(' | ')}）`);
   }
+  logger.info(`[login] 点击 ${what}...`);
   await loc.click();
 }
 
@@ -209,15 +216,21 @@ async function detectLoginForm(page, browserCfg) {
   return loc !== null;
 }
 
-/** 页面是否出现任一候选文本 */
-async function anyTextVisible(page, texts, timeoutMs = 600) {
-  for (const t of texts) {
-    try {
-      const loc = page.getByText(t, { exact: false }).first();
-      if (await loc.isVisible({ timeout: timeoutMs })) return t;
-    } catch (e) {
-      /* 继续 */
+/** 页面是否出现任一候选文本（DOM 内搜索，避免 locator 在无头环境卡死） */
+async function anyTextVisible(page, texts, timeoutMs = 1500) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    for (const t of texts) {
+      try {
+        const found = await page.evaluate((txt) => {
+          return document.body.innerText.toLowerCase().includes(txt.toLowerCase());
+        }, t);
+        if (found) return t;
+      } catch (e) {
+        /* 继续 */
+      }
     }
+    await sleep(300);
   }
   return null;
 }
@@ -250,8 +263,10 @@ async function shoot(page, tag) {
 
 async function ensureLoggedIn(page, browserCfg, user) {
   const loginUrlWithLang = appendLangParam(browserCfg.loginUrl);
-  await page.goto(loginUrlWithLang, { waitUntil: 'networkidle', timeout: 60000 });
-  await page.waitForTimeout(2000);
+  logger.info(`[login] 打开登录页: ${loginUrlWithLang}`);
+  await page.goto(loginUrlWithLang, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await page.waitForTimeout(4000);
+  logger.info('[login] 页面 DOM 已加载，等待语言检测...');
   await switchToChinese(page);
 
   // 如果已经在 dashboard（没有登录表单），可能是 cookie 未过期
@@ -290,16 +305,35 @@ async function ensureLoggedIn(page, browserCfg, user) {
 
   await clickFirstVisible(page, sels.loginButtons, '登录按钮');
 
-  // 登录结果判定（最多 15s）
-  for (let i = 0; i < 15; i++) {
-    const failedText = await anyTextVisible(page, sels.loginFailedTexts, 500);
+  // 登录结果判定（最多 120s；期间检测 DNSHE 邮箱安全验证 → 自动读取并填入验证码）
+  let verifyHandled = false;
+  for (let i = 0; i < 120; i++) {
+    // 1) DNSHE 邮箱安全验证（发送 6 位验证码到 126 邮箱）
+    if (!verifyHandled) {
+      const verifyTitle = await anyTextVisible(page, sels.verifyTitleTexts, 400);
+      if (verifyTitle) {
+        logger.info(`[verify] 检测到邮箱安全验证弹窗: ${verifyTitle}`);
+        await shoot(page, 'verify_modal_detected');
+        const verifyOk = await verifyCodeAndSubmit(page, browserCfg);
+        verifyHandled = true;
+        logger.info(`[verify] 验证码处理${verifyOk ? '完成' : '失败'}，继续等待登录结果...`);
+        if (!verifyOk) {
+          await shoot(page, 'verify_failed');
+        }
+        continue;
+      }
+    }
+
+    // 2) 登录失败
+    const failedText = await anyTextVisible(page, sels.loginFailedTexts, 400);
     if (failedText) {
       const thumb = await shoot(page, 'login_failed');
       return { ok: false, reason: `登录失败（页面提示: ${failedText}）`, thumb };
     }
+
+    // 3) 确认是否真的登录成功（检查 dashboard 特征）
     if (!(await detectLoginForm(page, browserCfg))) {
-      // 确认是否真的登录成功（检查 dashboard 特征）
-      const onDashboard = await anyTextVisible(page, ['欢迎回来', '我的域名', '控制台概览', 'Welcome back'], 500);
+      const onDashboard = await anyTextVisible(page, ['欢迎回来', '我的域名', '控制台概览', 'Welcome back'], 400);
       if (onDashboard) {
         logger.ok(`[${user.username}] 登录成功`);
         await switchToChinese(page);
@@ -311,6 +345,91 @@ async function ensureLoggedIn(page, browserCfg, user) {
   }
   const thumb = await shoot(page, 'login_timeout');
   return { ok: false, reason: '登录后未确认跳转（超时），请查看截图', thumb };
+}
+
+/**
+ * DNSHE 邮箱安全验证处理：从 126 邮箱读取验证码 → 填入 → 勾选"记住此设备60天" → 验证并继续。
+ * 若未配置 MAIL_126_USER / MAIL_126_AUTH，则跳过并提示。
+ * @returns {Promise<boolean>} true = 验证码已提交（或无需处理）
+ */
+async function verifyCodeAndSubmit(page, browserCfg) {
+  const sels = browserCfg.selectors;
+  const mail = browserCfg.mail || {};
+
+  const mailUser = mail.user || '';
+  const mailAuth = mail.auth || '';
+  if (!mailUser || !mailAuth) {
+    logger.error('[verify] 未配置 MAIL_126_USER / MAIL_126_AUTH（126 邮箱授权码），无法自动获取验证码');
+    return false;
+  }
+
+  // 1. 从 126 邮箱读取验证码（内部带重试）
+  logger.info(`[verify] 从 ${mailUser} 读取 DNSHE 验证码...`);
+  const code = await getVerificationCode(mailUser, mailAuth, {
+    maxRetries: mail.maxRetries || 15,
+    retryInterval: mail.retryInterval || 3000,
+    imapServer: mail.server,
+    imapPort: mail.port,
+  }).catch((e) => {
+    logger.error(`[verify] 读取验证码异常: ${e.message}`);
+    return null;
+  });
+
+  if (!code) {
+    logger.error('[verify] 未能获取验证码');
+    return false;
+  }
+
+  // 2. 找到验证码输入框
+  const inputLoc = await findVisible(page, sels.verifyCodeInputs, 3000);
+  if (!inputLoc) {
+    logger.error('[verify] 未找到验证码输入框');
+    return false;
+  }
+
+  // 3. 填码：6 个独立输入格（OTP 分格）或单个输入框
+  const allInputs = sels.verifyCodeInputs.join(',');
+  const totalInputs = await page.locator(allInputs).count().catch(() => 0);
+  const digits = code.split('');
+  if (totalInputs >= 4 && totalInputs <= 8) {
+    const boxes = page.locator(allInputs);
+    for (let d = 0; d < digits.length; d++) {
+      await boxes.nth(d).fill(digits[d]).catch((e) => {
+        logger.warn(`[verify] 第 ${d + 1} 格填入失败: ${e.message}`);
+      });
+    }
+    logger.info(`[verify] 已按 ${digits.length} 个输入格填入验证码`);
+  } else {
+    await inputLoc.fill(code);
+    logger.info(`[verify] 已填入验证码: ${code}`);
+  }
+
+  await sleep(800);
+
+  // 4. 勾选"记住此设备60天"（若存在）
+  const rememberLoc = await findVisible(page, sels.rememberDeviceCheckboxes, 1500);
+  if (rememberLoc) {
+    try {
+      const checked = await rememberLoc.isChecked().catch(() => false);
+      if (!checked) {
+        await rememberLoc.check().catch(() => logger.warn('[verify] 勾选记住设备失败（忽略）'));
+      }
+      logger.info('[verify] 已勾选 记住此设备60天');
+    } catch (e) { /* 忽略 */ }
+  }
+
+  await shoot(page, 'verify_code_filled');
+
+  // 5. 点击"验证并继续"
+  const submitBtn = await findVisible(page, sels.verifySubmitButtons, 3000);
+  if (!submitBtn) {
+    logger.error('[verify] 未找到"验证并继续"按钮');
+    return false;
+  }
+  await submitBtn.click();
+  logger.info('[verify] 已点击 验证并继续，等待验证通过...');
+  await sleep(3000);
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -396,16 +515,17 @@ async function renewOneDomain(page, browserCfg, user, domain) {
 
   const sels = browserCfg.selectors;
 
-  // 点击"续期和域名详情" tab
+  // 点击"续期和域名详情" tab（DOM 内搜索 + 点击，避免 xvfb 下 isVisible 卡死）
   let tabClicked = false;
   for (const sel of sels.renewTabSelectors) {
     try {
-      const loc = page.locator(sel).first();
-      if (await loc.isVisible({ timeout: 2000 })) {
-        await loc.click();
+      const count = await page.locator(sel).count();
+      if (count > 0) {
+        const loc = page.locator(sel).first();
+        await loc.click({ timeout: 5000 });
         tabClicked = true;
         logger.info(`[${user.username}] 已点击"续期和域名详情"tab（${domain.name}）`);
-        await page.waitForTimeout(2000);
+        await sleep(2000);
         break;
       }
     } catch (e) {
@@ -421,33 +541,38 @@ async function renewOneDomain(page, browserCfg, user, domain) {
   // 截图：点击 tab 后
   await shoot(page, `domain_renew_tab_${domain.domainId}`);
 
-  // 检查"当前不可续期"禁用按钮
+  // 检查"当前不可续期"禁用按钮（DOM 搜索）
   for (const sel of sels.notRenewableSelectors) {
     try {
-      const loc = page.locator(sel).first();
-      if (await loc.isVisible({ timeout: 2000 })) {
-        const isDisabled = await loc.evaluate((el) => el.disabled || el.getAttribute('disabled') || el.classList.contains('disabled')).catch(() => false);
-        if (isDisabled) {
-          const thumb = await shoot(page, `domain_not_renewable_${domain.domainId}`);
-          return { status: 'notReady', detail: `${domain.name}: 当前不可续期（按钮已禁用）`, thumb };
-        }
+      const found = await page.evaluate((selector) => {
+        const el = document.querySelector(selector);
+        if (!el) return false;
+        const txt = (el.textContent || '').trim();
+        const disabled = el.disabled || el.getAttribute('disabled') || el.classList.contains('disabled');
+        return txt.includes('不可续期') && disabled;
+      }, sel);
+      if (found) {
+        const thumb = await shoot(page, `domain_not_renewable_${domain.domainId}`);
+        return { status: 'notReady', detail: `${domain.name}: 当前不可续期（按钮已禁用）`, thumb };
       }
     } catch (e) {
       /* 继续 */
     }
   }
 
-  // 查找可点击的续期按钮
+  // 查找可点击的续期按钮（DOM 搜索）
   let renewBtn = null;
   for (const sel of sels.renewActionButtons) {
     try {
-      const loc = page.locator(sel).first();
-      if (await loc.isVisible({ timeout: 2000 })) {
-        const isDisabled = await loc.evaluate((el) => el.disabled || el.getAttribute('disabled') || el.classList.contains('disabled')).catch(() => false);
-        if (!isDisabled) {
-          renewBtn = loc;
-          break;
-        }
+      const elInfo = await page.evaluate((selector) => {
+        const el = document.querySelector(selector);
+        if (!el) return null;
+        const disabled = el.disabled || el.getAttribute('disabled') || el.classList.contains('disabled');
+        return { found: true, disabled };
+      }, sel);
+      if (elInfo && !elInfo.disabled) {
+        renewBtn = page.locator(sel).first();
+        break;
       }
     } catch (e) {
       /* 继续 */
@@ -589,6 +714,7 @@ async function logoutAccount(page, browserCfg, user) {
 async function runBrowserRenew(cfg, users) {
   process.env.NO_PROXY = 'localhost,127.0.0.1';
   const browserCfg = cfg.browser;
+  browserCfg.mail = cfg.mail || {};
 
   await launchNativeChrome(browserCfg);
 

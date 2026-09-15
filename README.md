@@ -24,6 +24,10 @@ katabump（VPS 续期项目，已验证的 Playwright + CDP 绕过 Cloudflare �
 - 📸 **每次续期必定截图**：无论续期成功 / 失败 / 跳过，都会输出两张图 ——
   **缩略图**（随 Telegram 报告以图片消息推送）＋ **整页全图**（上传至 Actions Artifacts 存档核对）；
   登录失败、超时等异常同样截图留痕。
+- 🔐 **自动通过邮箱安全验证**：新版 DNSHE 在陌生环境（如 GitHub Actions 全新 IP）登录后会
+  向账号邮箱发送 6 位验证码并要求"安全验证"。配置 126 邮箱授权码后，脚本通过 **IMAP
+  自动读取验证码并填入**（登录后检测"安全验证"弹窗 → `src/verify-code.js` 连
+  `imap.126.com:993` 读未读邮件提取 6 位码 → 自动填码提交），全程无需人工干预。
 - 🕐 cron 默认每月 1 日 00:00 UTC（北京 8:00）执行，同时保留手动触发按钮。
 
 ---
@@ -47,6 +51,8 @@ katabump（VPS 续期项目，已验证的 Playwright + CDP 绕过 Cloudflare �
 | `PUSH_TEMPLATE` | 可选 | 自定义 Webhook body 模板（JSON 字符串，支持 `{{title}}`/`{{content}}` 变量） |
 | `TG_BOT_TOKEN` | 可选 | **推荐**：Telegram 直推。`@BotFather` 创建/管理的机器人 token（可与 substracker 共用同一个 bot） |
 | `TG_CHAT_ID` | 可选 | **推荐**：你的 TG 数字 user id（= substracker 里配置 Telegram 时生成的绑定码值；未配置时可用 `@userinfobot` 查询） |
+| `MAIL_126_USER` | 建议 | 接收 DNSHE 验证码的 126 邮箱地址（一般就是账号邮箱）。配置后登录遇到"安全验证"可自动填码 |
+| `MAIL_126_AUTH` | 建议 | 126 邮箱 **IMAP 授权码**（不是登录密码）：网页邮箱 → 设置 → POP3/SMTP/IMAP → 开启 IMAP/SMTP → 生成授权码 |
 | `DNSHE_RENEW_THRESHOLD_DAYS` | 可选 | 续期阈值天数，默认 `180` |
 
    > 单账号与多账号互斥：同时配置时 **`USERS_JSON` 优先**。
@@ -58,6 +64,22 @@ katabump（VPS 续期项目，已验证的 Playwright + CDP 绕过 Cloudflare �
 
 > 域名续期窗口在到期前 180 天打开，每月跑一次不会错过。
 > 后续按需修改 `.github/workflows/renew.yml` 的 cron 即可，例如每 15 天一次：`'0 0 */15 * *'`。
+
+### 邮箱安全验证自动填码（推荐配置）
+
+GitHub Actions 每次运行都是全新环境（新 IP + 新 Chrome profile），新版 DNSHE 登录后
+**大概率触发邮箱安全验证**（向账号邮箱发送 6 位验证码，页面弹"安全验证"）。不处理会卡在这一步直到超时。
+
+配置 `MAIL_126_USER` + `MAIL_126_AUTH` 后自动解决：
+
+1. 登录 126 网页邮箱 → **设置 → POP3/SMTP/IMAP** → 开启 **IMAP/SMTP 服务**（手机短信验证）→
+   生成 **客户端授权码**（16 位，不是登录密码）。**用登录密码连 IMAP 会报 `535 Authentication failed`**。
+2. 把邮箱地址和授权码分别填入 Secrets `MAIL_126_USER` / `MAIL_126_AUTH`。
+3. 脚本登录流程中检测到"安全验证"弹窗 → `src/verify-code.js` 通过
+   `imap.126.com:993`(SSL) 连接邮箱 → 发送 **IMAP ID 命令**（网易必须，避免 `Unsafe Login`）→
+   搜索当天未读邮件 → 正则提取 6 位验证码 → 自动填入并提交，成功后还会勾选"记住此设备60天"。
+
+> 未配置这两项时脚本会跳过自动验证（日志提示），登录将卡在验证码页直到超时——线上跑请务必配置。
 
 ---
 
@@ -117,7 +139,7 @@ npm start                                 # 默认浏览器引擎，连 9222 端
 ```
 .
 ├── renew.js                     # 入口：按 DNSHE_MODE 选引擎
-├── package.json                 # 依赖（playwright / playwright-extra / stealth）
+├── package.json                 # 依赖（playwright / playwright-extra / stealth / node-imap）
 ├── .env.example                 # 环境变量示例
 ├── start_chrome.bat             # Windows 本地调试启动 CDP Chrome
 ├── .github/workflows/renew.yml  # GitHub Actions：cron + 手动触发
@@ -127,7 +149,8 @@ npm start                                 # 默认浏览器引擎，连 9222 端
     ├── notify.js                # 通用 webhook 推送 + 可选 Telegram
     ├── inject.js                # stealth + attachShadow hook（原样移植 katabump）
     ├── turnstile.js             # Turnstile 点击：CDP 原生鼠标 + DOM 备用策略
-    ├── browser-engine.js        # 浏览器引擎：登录、续期循环、截图、汇总
+    ├── verify-code.js           # 126 邮箱 IMAP 验证码读取（ID 命令 + 未读搜索 + 正则提取）
+    ├── browser-engine.js        # 浏览器引擎：登录（含验证码自动填码）、续期循环、截图、汇总
     └── api-engine.js            # 官方 API 引擎（对应 Python list/quota/renew 逻辑）
 ```
 
@@ -135,9 +158,11 @@ npm start                                 # 默认浏览器引擎，连 9222 端
 
 ## 常见问题
 
-- **登录后提示验证码/被识别**：GitHub Actions 环境跑一次截图确认；若 Cloudflare 升级
-  防线，先尝试：① 换 `api` 模式兜底；② 调高 `turnstile` 重试轮数（`src/browser-engine.js`
-  的 `maxTurnstileRetries`）；③ 等待 DNSHE 网页改版后调整选择器。
+- **登录后提示验证码/被识别**：如果是 DNSHE 的**邮箱安全验证**（"安全验证"弹窗 + 发验证码），
+  配置 `MAIL_126_USER` / `MAIL_126_AUTH` 自动填码即可；若卡在验证码页未处理，检查这两项是否已配置、
+  授权码是否有效（166 邮箱需 IMAP ID 命令，脚本已内置）。若是 Cloudflare Turnstile，先尝试：
+  ① 换 `api` 模式兜底；② 调高 `turnstile` 重试轮数（`src/browser-engine.js` 的 `maxTurnstileRetries`）；
+  ③ 等待 DNSHE 网页改版后调整选择器。
 - **续期按钮没有点到（截图里仍显示 Free Renewal）**：DNSHE 网页版偶尔改版。
   所有选择器集中在 `src/config.js` 的 `SELECTORS`，按截图微调即可，无需改业务逻辑。
 - **`renewal_not_yet_available`**：该域名尚未进入续期窗口（剩余 > 180 天），

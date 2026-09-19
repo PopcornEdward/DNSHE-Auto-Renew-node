@@ -28,7 +28,7 @@ katabump（VPS 续期项目，已验证的 Playwright + CDP 绕过 Cloudflare �
   向账号邮箱发送 6 位验证码并要求"安全验证"。配置 126 邮箱授权码后，脚本通过 **IMAP
   自动读取验证码并填入**（登录后检测"安全验证"弹窗 → `src/verify-code.js` 连
   `imap.126.com:993` 读未读邮件提取 6 位码 → 自动填码提交），全程无需人工干预。
-- 🕐 cron 默认每月 1 日 00:00 UTC（北京 8:00）执行，同时保留手动触发按钮。
+- 🕐 cron 默认**每天 00:00 UTC（北京 8:00）**执行，同时保留手动触发按钮。
 
 ---
 
@@ -62,8 +62,10 @@ katabump（VPS 续期项目，已验证的 Playwright + CDP 绕过 Cloudflare �
 3. **Actions → 选中 `DNSHE Domain Auto Renew` → Run workflow** 手动跑一次。
 4. 下载 **Artifacts → dnshe-renew-screenshots** 核对登录与续期截图。
 
-> 域名续期窗口在到期前 180 天打开，每月跑一次不会错过。
-> 后续按需修改 `.github/workflows/renew.yml` 的 cron 即可，例如每 15 天一次：`'0 0 */15 * *'`。
+> 域名续期窗口在到期前 180 天打开，cron 默认**每天**跑一次：未进入窗口时
+> API 返回 `renewal_not_yet_available`（良性，自动跳过），进入窗口后自动续期成功并通知，
+> **无需网页确认按钮状态**。想调整频率改 `.github/workflows/renew.yml` 的 cron 即可，
+> 例如每 15 天一次：`'0 0 */15 * *'`。
 
 ### 邮箱安全验证自动填码（推荐配置）
 

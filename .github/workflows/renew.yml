@@ -5,9 +5,10 @@ name: "DNSHE Domain Auto Renew"
 on:
   schedule:
     # cron 表达式：分 时 日 月 周（UTC）
-    # 每月 1 日 00:00 UTC = 北京时间每月 1 日 08:00
-    # DNSHE 续期窗口在到期前 180 天打开，每月执行一次足够，可自行改密
-    - cron: '0 0 1 * *'
+    # 每天 00:00 UTC = 北京时间每天 08:00
+    # API 引擎每日调用：未进入续期窗口时接口返回 renewal_not_yet_available（良性），
+    # 进入窗口后自动续期成功，无需网页确认按钮状态
+    - cron: '0 0 * * *'
   workflow_dispatch: # 保留手动触发按钮，便于测试
 
 concurrency:
